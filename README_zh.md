@@ -19,14 +19,15 @@
 ## 目录
 
 1. [快速上手：五分钟环境就绪](#快速上手五分钟环境就绪)
-2. [数据格式要求](#数据格式要求)
-3. [配置系统：从硬件到实验](#配置系统从硬件到实验)
-4. [运行模式：小白 vs 专家](#运行模式小白-vs-专家)
-5. [产物地图：结果在哪？](#产物地图结果在哪)
-6. [科学评估标准](#科学评估标准)
-7. [支持的模型](#支持的模型)
-8. [训练参数参考](#训练参数参考)
-9. [常见问题](#常见问题)
+2. [Codex Skill：THETA Workflow](#codex-skilltheta-workflow)
+3. [数据格式要求](#数据格式要求)
+4. [配置系统：从硬件到实验](#配置系统从硬件到实验)
+5. [运行模式：小白 vs 专家](#运行模式小白-vs-专家)
+6. [产物地图：结果在哪？](#产物地图结果在哪)
+7. [科学评估标准](#科学评估标准)
+8. [支持的模型](#支持的模型)
+9. [训练参数参考](#训练参数参考)
+10. [常见问题](#常见问题)
 
 ---
 
@@ -113,6 +114,38 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 ```
 
 > **注意**：首次运行时，模型下载可能需要几分钟时间。如果网络问题导致自动下载失败，请参考上方表格中的下载链接手动下载。
+
+---
+
+## Codex Skill：THETA Workflow
+
+本仓库内置了可发布的 Codex skill：[`skills/theta-workflow/`](skills/theta-workflow/)。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。skill 内置中文和英文两套用户询问与确认流程。
+
+从已经检出的 THETA 仓库安装 skill：
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
+```
+
+安装后重启 Codex，让 Codex 发现这个 skill，然后直接调用：
+
+```text
+使用 $theta-workflow 帮我跑一个政策文本主题建模流程。
+```
+
+启动 skill 后会先检查当前工作区是否是可用 THETA 仓库；如果不存在，第一步是确认后克隆 `https://github.com/CodeSoul-co/THETA.git`，然后才进入环境配置、数据检查或训练命令生成。
+
+在修改本地文件或启动训练前，可以先运行只读预检：
+
+```bash
+python skills/theta-workflow/scripts/inspect_theta_env.py \
+  --dataset path/to/data.csv \
+  --text-column text \
+  --mode zero_shot
+```
+
+这个 skill 会强制区分只读检查和高影响操作：写文件、安装依赖、修改 `.env`、调用云端 embedding API、下载模型、启动训练、覆盖结果、删除文件或修改 git 状态前，都必须先获得用户明确确认。云端 embedding 只允许用于 `zero_shot`；`supervised`、`unsupervised` 或任何需要 finetune 的流程必须使用本地模型。
 
 ---
 

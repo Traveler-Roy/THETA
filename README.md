@@ -19,14 +19,15 @@
 ## Table of Contents
 
 1. [Quick Start: 5-Minute Setup](#quick-start-5-minute-setup)
-2. [Data Format Requirements](#data-format-requirements)
-3. [Configuration System: From Hardware to Experiments](#configuration-system-from-hardware-to-experiments)
-4. [Running Modes: Beginner vs Expert](#running-modes-beginner-vs-expert)
-5. [Output Map: Where Are the Results?](#output-map-where-are-the-results)
-6. [Scientific Evaluation Standards](#scientific-evaluation-standards)
-7. [Supported Models](#supported-models)
-8. [Training Parameters Reference](#training-parameters-reference)
-9. [FAQ](#faq)
+2. [Codex Skill: THETA Workflow](#codex-skill-theta-workflow)
+3. [Data Format Requirements](#data-format-requirements)
+4. [Configuration System: From Hardware to Experiments](#configuration-system-from-hardware-to-experiments)
+5. [Running Modes: Beginner vs Expert](#running-modes-beginner-vs-expert)
+6. [Output Map: Where Are the Results?](#output-map-where-are-the-results)
+7. [Scientific Evaluation Standards](#scientific-evaluation-standards)
+8. [Supported Models](#supported-models)
+9. [Training Parameters Reference](#training-parameters-reference)
+10. [FAQ](#faq)
 
 ---
 
@@ -102,6 +103,38 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 ```
 
 > **Note**: The first run may take a few minutes to download models. If automatic download fails due to network issues, please manually download from the links above.
+
+---
+
+## Codex Skill: THETA Workflow
+
+This repository includes a publishable Codex skill at [`skills/theta-workflow/`](skills/theta-workflow/). Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill includes separate Chinese and English user-question and confirmation flows.
+
+Install the skill from a checked-out THETA repository:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
+```
+
+Restart Codex after installation so the skill is discovered, then invoke it directly:
+
+```text
+Use $theta-workflow to help me run THETA topic modeling on a policy-text dataset.
+```
+
+When the skill is active, it first checks whether the current workspace is a usable THETA repository. If no repository is found, the first confirmed step is cloning `https://github.com/CodeSoul-co/THETA.git`; it will not configure the environment, inspect data, or generate training commands before the repository exists.
+
+Run the read-only preflight helper before changing local files or launching training:
+
+```bash
+python skills/theta-workflow/scripts/inspect_theta_env.py \
+  --dataset path/to/data.csv \
+  --text-column text \
+  --mode zero_shot
+```
+
+The skill enforces explicit confirmation before writing files, installing dependencies, editing `.env`, calling cloud embedding APIs, downloading models, running training, overwriting results, deleting files, or changing git state. Cloud embedding is only allowed for `zero_shot`; supervised or unsupervised finetune-capable workflows must use local models.
 
 ---
 
