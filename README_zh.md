@@ -119,7 +119,7 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ## Agent Workflow Skill：THETA Workflow
 
-本仓库内置了可发布的通用 agent workflow skill：[`skills/theta-workflow/`](skills/theta-workflow/)。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。这个 skill 由 Markdown 指令和一个只读 Python 预检脚本组成，不依赖 Codex 专有 API；同时内置中文和英文两套用户询问与确认流程。
+本仓库内置了可发布的通用 agent workflow skill：[`skills/theta-workflow/`](skills/theta-workflow/)。独立公开版本发布在 [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill)，方便不想 clone 完整 THETA 项目的 agent 单独安装。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。这个 skill 由 Markdown 指令和一个只读 Python 预检脚本组成，不依赖 Codex 专有 API；同时内置中文和英文两套用户询问与确认流程。
 
 通用用法：
 
@@ -131,6 +131,13 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 ```
 
 如果你的 agent runtime 支持命名 skill 调用，也可以使用 `$theta-workflow`。
+
+如果要从独立仓库安装，而不是从当前 THETA checkout 安装：
+
+```bash
+git clone https://github.com/CodeSoul-co/theta-skill.git
+cp -R theta-skill/theta-workflow "<AGENT_SKILLS_DIR>/theta-workflow"
+```
 
 通用目录安装示例：
 
@@ -147,6 +154,8 @@ cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
 ```
 
 如果你的 agent 会缓存 skill 列表，安装后需要重启或重新加载对应 agent runtime。
+
+独立仓库内置维护用同步脚本：在 `theta-skill` 仓库中运行 `scripts/sync_from_theta.sh` 可以从本仓库拉取最新 skill，运行 `scripts/sync_to_theta.sh` 可以把独立仓库修改同步回 `skills/theta-workflow/`。
 
 启动 skill 后会先检查当前工作区是否是可用 THETA 仓库；如果不存在，第一步是确认后克隆 `https://github.com/CodeSoul-co/THETA.git`，然后才进入环境配置、数据检查或训练命令生成。
 
