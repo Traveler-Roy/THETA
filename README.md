@@ -108,7 +108,7 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ## Agent Workflow Skill: THETA Workflow
 
-This repository includes a portable agent workflow skill at [`skills/theta-workflow/`](skills/theta-workflow/). A standalone public copy is published at [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill) for agents that want to install the workflow without cloning the full THETA project. Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill is plain Markdown plus a read-only Python helper, so it does not require Codex-specific APIs. It also includes separate Chinese and English user-question and confirmation flows.
+This repository includes a portable agent workflow skill at [`skills/theta-workflow/`](skills/theta-workflow/). A standalone public copy is published at [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill) for agents that want to install the workflow without cloning the full THETA project. The standalone repository also links back to [CodeSoul-co/THETA](https://github.com/CodeSoul-co/THETA), so both publication surfaces point to each other. Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill is plain Markdown plus a read-only Python helper, so it does not require Codex-specific APIs. It also includes separate Chinese and English user-question and confirmation flows.
 
 Generic usage:
 

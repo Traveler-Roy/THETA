@@ -119,7 +119,7 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ## Agent Workflow Skill：THETA Workflow
 
-本仓库内置了可发布的通用 agent workflow skill：[`skills/theta-workflow/`](skills/theta-workflow/)。独立公开版本发布在 [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill)，方便不想 clone 完整 THETA 项目的 agent 单独安装。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。这个 skill 由 Markdown 指令和一个只读 Python 预检脚本组成，不依赖 Codex 专有 API；同时内置中文和英文两套用户询问与确认流程。
+本仓库内置了可发布的通用 agent workflow skill：[`skills/theta-workflow/`](skills/theta-workflow/)。独立公开版本发布在 [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill)，方便不想 clone 完整 THETA 项目的 agent 单独安装。独立仓库也会反向链接到 [CodeSoul-co/THETA](https://github.com/CodeSoul-co/THETA)，两个发布入口互相指向。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。这个 skill 由 Markdown 指令和一个只读 Python 预检脚本组成，不依赖 Codex 专有 API；同时内置中文和英文两套用户询问与确认流程。
 
 通用用法：
 
