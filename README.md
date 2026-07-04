@@ -108,7 +108,7 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ## Agent Workflow Skill: THETA Workflow
 
-This repository includes a portable agent workflow skill at [`skills/theta-workflow/`](skills/theta-workflow/). Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill is plain Markdown plus a read-only Python helper, so it does not require Codex-specific APIs. It also includes separate Chinese and English user-question and confirmation flows.
+This repository includes a portable agent workflow skill at [`skills/theta-workflow/`](skills/theta-workflow/). A standalone public copy is published at [CodeSoul-co/theta-skill](https://github.com/CodeSoul-co/theta-skill) for agents that want to install the workflow without cloning the full THETA project. Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill is plain Markdown plus a read-only Python helper, so it does not require Codex-specific APIs. It also includes separate Chinese and English user-question and confirmation flows.
 
 Generic usage:
 
@@ -120,6 +120,13 @@ Use the THETA Workflow skill in skills/theta-workflow to help me run THETA topic
 ```
 
 If your agent runtime supports named skill invocation, this can also be called as `$theta-workflow`.
+
+To install from the standalone repository instead of this THETA checkout:
+
+```bash
+git clone https://github.com/CodeSoul-co/theta-skill.git
+cp -R theta-skill/theta-workflow "<AGENT_SKILLS_DIR>/theta-workflow"
+```
 
 Generic folder-based install:
 
@@ -136,6 +143,8 @@ cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
 ```
 
 Restart or reload your agent runtime after installation if it caches available skills.
+
+The standalone repository includes sync scripts for maintainers. Use `scripts/sync_from_theta.sh` there to pull updates from this THETA copy, or `scripts/sync_to_theta.sh` to push standalone edits back into `skills/theta-workflow/`.
 
 When the skill is active, it first checks whether the current workspace is a usable THETA repository. If no repository is found, the first confirmed step is cloning `https://github.com/CodeSoul-co/THETA.git`; it will not configure the environment, inspect data, or generate training commands before the repository exists.
 
