@@ -19,7 +19,7 @@
 ## 目录
 
 1. [快速上手：五分钟环境就绪](#快速上手五分钟环境就绪)
-2. [Codex Skill：THETA Workflow](#codex-skilltheta-workflow)
+2. [Agent Workflow Skill：THETA Workflow](#agent-workflow-skilltheta-workflow)
 3. [数据格式要求](#数据格式要求)
 4. [配置系统：从硬件到实验](#配置系统从硬件到实验)
 5. [运行模式：小白 vs 专家](#运行模式小白-vs-专家)
@@ -117,22 +117,36 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ---
 
-## Codex Skill：THETA Workflow
+## Agent Workflow Skill：THETA Workflow
 
-本仓库内置了可发布的 Codex skill：[`skills/theta-workflow/`](skills/theta-workflow/)。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。skill 内置中文和英文两套用户询问与确认流程。
+本仓库内置了可发布的通用 agent workflow skill：[`skills/theta-workflow/`](skills/theta-workflow/)。当你希望 agent 帮你处理完整 THETA 流程时，可以使用它，包括仓库检查、数据确认、环境预检、embedding 模式选择、模型推荐、命令生成、执行确认、结果解释、调参和报告整理。这个 skill 由 Markdown 指令和一个只读 Python 预检脚本组成，不依赖 Codex 专有 API；同时内置中文和英文两套用户询问与确认流程。
 
-从已经检出的 THETA 仓库安装 skill：
+通用用法：
+
+1. 让你的 agent 读取 [`skills/theta-workflow/SKILL.md`](skills/theta-workflow/SKILL.md)，或者把整个 `skills/theta-workflow/` 目录安装/复制到该 agent 的 skills 目录。
+2. 向 agent 说明使用 THETA Workflow skill 或其中的指令：
+
+```text
+使用 skills/theta-workflow 里的 THETA Workflow skill 帮我跑一个政策文本主题建模流程。
+```
+
+如果你的 agent runtime 支持命名 skill 调用，也可以使用 `$theta-workflow`。
+
+通用目录安装示例：
+
+```bash
+mkdir -p "<AGENT_SKILLS_DIR>"
+cp -R skills/theta-workflow "<AGENT_SKILLS_DIR>/theta-workflow"
+```
+
+可选的 Codex 兼容本地安装示例：
 
 ```bash
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
 ```
 
-安装后重启 Codex，让 Codex 发现这个 skill，然后直接调用：
-
-```text
-使用 $theta-workflow 帮我跑一个政策文本主题建模流程。
-```
+如果你的 agent 会缓存 skill 列表，安装后需要重启或重新加载对应 agent runtime。
 
 启动 skill 后会先检查当前工作区是否是可用 THETA 仓库；如果不存在，第一步是确认后克隆 `https://github.com/CodeSoul-co/THETA.git`，然后才进入环境配置、数据检查或训练命令生成。
 

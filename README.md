@@ -19,7 +19,7 @@
 ## Table of Contents
 
 1. [Quick Start: 5-Minute Setup](#quick-start-5-minute-setup)
-2. [Codex Skill: THETA Workflow](#codex-skill-theta-workflow)
+2. [Agent Workflow Skill: THETA Workflow](#agent-workflow-skill-theta-workflow)
 3. [Data Format Requirements](#data-format-requirements)
 4. [Configuration System: From Hardware to Experiments](#configuration-system-from-hardware-to-experiments)
 5. [Running Modes: Beginner vs Expert](#running-modes-beginner-vs-expert)
@@ -106,22 +106,36 @@ bash scripts/train_theta.sh --dataset your_dataset --model_size 0.6B
 
 ---
 
-## Codex Skill: THETA Workflow
+## Agent Workflow Skill: THETA Workflow
 
-This repository includes a publishable Codex skill at [`skills/theta-workflow/`](skills/theta-workflow/). Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill includes separate Chinese and English user-question and confirmation flows.
+This repository includes a portable agent workflow skill at [`skills/theta-workflow/`](skills/theta-workflow/). Use it when you want an agent to guide the full THETA process: repository check, data confirmation, environment preflight, embedding selection, model recommendation, command review, training confirmation, result analysis, tuning, and reporting. The skill is plain Markdown plus a read-only Python helper, so it does not require Codex-specific APIs. It also includes separate Chinese and English user-question and confirmation flows.
 
-Install the skill from a checked-out THETA repository:
+Generic usage:
+
+1. Point your agent at [`skills/theta-workflow/SKILL.md`](skills/theta-workflow/SKILL.md), or install/copy the whole `skills/theta-workflow/` folder into your agent's skill directory.
+2. Ask the agent to use the THETA Workflow skill or instructions:
+
+```text
+Use the THETA Workflow skill in skills/theta-workflow to help me run THETA topic modeling on a policy-text dataset.
+```
+
+If your agent runtime supports named skill invocation, this can also be called as `$theta-workflow`.
+
+Generic folder-based install:
+
+```bash
+mkdir -p "<AGENT_SKILLS_DIR>"
+cp -R skills/theta-workflow "<AGENT_SKILLS_DIR>/theta-workflow"
+```
+
+Optional Codex-compatible local install:
 
 ```bash
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R skills/theta-workflow "${CODEX_HOME:-$HOME/.codex}/skills/theta-workflow"
 ```
 
-Restart Codex after installation so the skill is discovered, then invoke it directly:
-
-```text
-Use $theta-workflow to help me run THETA topic modeling on a policy-text dataset.
-```
+Restart or reload your agent runtime after installation if it caches available skills.
 
 When the skill is active, it first checks whether the current workspace is a usable THETA repository. If no repository is found, the first confirmed step is cloning `https://github.com/CodeSoul-co/THETA.git`; it will not configure the environment, inspect data, or generate training commands before the repository exists.
 
