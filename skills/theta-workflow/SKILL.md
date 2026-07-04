@@ -5,7 +5,7 @@ description: Guide THETA topic-modeling workflows with strong user confirmation 
 
 # THETA Workflow
 
-Use this skill to guide users through THETA topic-modeling work from intent clarification to result interpretation. Match the user's language: use Chinese for Chinese requests and English for English requests.
+Use this portable agent workflow skill to guide users through THETA topic-modeling work from intent clarification to result interpretation. Match the user's language: use Chinese for Chinese requests and English for English requests. Do not assume Codex-specific APIs; the core workflow relies on reading files, asking for confirmation, running ordinary shell commands when confirmed, and using the bundled read-only Python preflight helper.
 
 ## Core Safety Protocol
 
@@ -101,14 +101,16 @@ For `supervised`, `unsupervised`, or any workflow that needs finetuning, require
 
 ## Invocation Behavior
 
-When invoked explicitly as `$theta-workflow`, treat the current workspace as the first candidate THETA repository. If the current workspace is not THETA, inspect any user-provided path. If no usable repository is found, stop at the clone confirmation step. Do not ask dataset questions or propose environment setup until the repository gate is satisfied.
+When an agent uses this skill, whether by reading `SKILL.md`, by loading the `skills/theta-workflow/` directory, or by named invocation such as `$theta-workflow`, treat the current workspace as the first candidate THETA repository. If the current workspace is not THETA, inspect any user-provided path. If no usable repository is found, stop at the clone confirmation step. Do not ask dataset questions or propose environment setup until the repository gate is satisfied.
 
 Good first user prompts:
 
 ```text
-Use $theta-workflow to help me run THETA topic modeling on a policy-text dataset.
-使用 $theta-workflow 帮我跑一个政策文本主题建模流程。
+Use the THETA Workflow skill in skills/theta-workflow to help me run THETA topic modeling on a policy-text dataset.
+使用 skills/theta-workflow 里的 THETA Workflow skill 帮我跑一个政策文本主题建模流程。
 ```
+
+If the runtime supports named skill syntax, `$theta-workflow` is also acceptable.
 
 ## Reference Routing
 
