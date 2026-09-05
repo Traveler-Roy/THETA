@@ -679,7 +679,6 @@ If you find **THETA** useful in your research, please consider citing our paper:
 
 For questions, please contact:
 - duanzhenke@code-soul.com
-- lixin@code-soul.com
 
 ---
 
