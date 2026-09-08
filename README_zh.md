@@ -697,3 +697,8 @@ kill -9 <PID>
 ## 许可证
 
 Apache-2.0
+
+
+[论文级可视化与高清导出](docs/publication-visualization.md)
+
+[中英文完整组图示例](docs/examples/figure-atlas/README_zh.md)

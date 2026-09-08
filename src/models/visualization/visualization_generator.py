@@ -10,6 +10,7 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import matplotlib
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -20,26 +21,29 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # High quality DPI
-DPI = 600
+from visualization.publication import COLORS, setup_style, save_figure, validate_export
+
+DPI = 300
 
 
 class VisualizationGenerator:
     """
     Visualization chart generator with bilingual support (English/Chinese).
-    
+
     Supports:
     - Global charts: topic table, network graph, clustering heatmap, etc.
     - Per-topic charts: word importance, evolution, word distribution changes
     - Bilingual labels (English/Chinese)
     """
-    
-    def __init__(self, theta, beta, vocab, topic_words, 
+
+    def __init__(self, theta, beta, vocab, topic_words,
                  topic_embeddings=None, timestamps=None, dimension_values=None,
                  bow_matrix=None, training_history=None, metrics=None,
-                 output_dir='./visualization', language='en', dpi=600):
+                 output_dir='./visualization', language='en', dpi=300, formats=('png', 'pdf', 'svg'),
+                 beta_over_time=None, time_slices_info=None):
         """
         Initialize visualization generator.
-        
+
         Args:
             theta: Document-topic distribution matrix (n_docs, n_topics)
             beta: Topic-word distribution matrix (n_topics, n_vocab)
@@ -57,147 +61,71 @@ class VisualizationGenerator:
         """
         self.theta = theta
         self.beta = beta
+        self.beta_over_time = beta_over_time
+        self.time_slices_info = time_slices_info or {}
         self.vocab = vocab
         self.topic_words = topic_words
         self.topic_embeddings = topic_embeddings
-        self.timestamps = timestamps
+        self.timestamps = None if timestamps is None else pd.DatetimeIndex(timestamps).to_pydatetime()
         self.dimension_values = dimension_values
         self.bow_matrix = bow_matrix
         self.training_history = training_history
-        self.metrics = metrics
+        self.metrics = dict(metrics) if metrics is not None else None
+        if self.metrics is not None:
+            aliases = {'NPMI': 'topic_coherence_npmi', 'C_V': 'topic_coherence_cv',
+                       'UMass': 'topic_coherence_umass', 'Exclusivity': 'topic_exclusivity'}
+            for native, chart in aliases.items():
+                for suffix, target in [('', '_avg'), ('_per_topic', '_per_topic')]:
+                    if self.metrics.get(native + suffix) is not None:
+                        self.metrics.setdefault(chart + target, self.metrics[native + suffix])
         self.output_dir = Path(output_dir)
         self.language = language
         self.dpi = dpi
-        
+        self.formats = validate_export(dpi, formats)
+        self._projection = None
+        self.exported_files = []
+
         self.n_docs, self.n_topics = theta.shape
         self.n_vocab = beta.shape[1]
-        
+
         # Setup fonts
         self._setup_fonts()
-        
+
         # Create output directories
         self._create_output_dirs()
-    
+
     def _setup_fonts(self):
-        """Setup fonts for proper display."""
-        import matplotlib.font_manager as fm
-        import os
-        import platform
-        
-        cache_dir = matplotlib.get_cachedir()
-        for f in os.listdir(cache_dir) if os.path.exists(cache_dir) else []:
-            if f.startswith('fontlist'):
-                try:
-                    os.remove(os.path.join(cache_dir, f))
-                except:
-                    pass
-        
-        try:
-            fm._load_fontmanager(try_read_cache=False)
-        except:
-            pass
-        
-        # Platform-specific font paths
-        system = platform.system().lower()
-        if self.language == 'zh':
-            font_paths = []
-            
-            if system == 'windows':
-                # Windows font paths
-                windows_fonts = [
-                    'C:/Windows/Fonts/msyh.ttc',      # Microsoft YaHei
-                    'C:/Windows/Fonts/simhei.ttf',    # SimHei
-                    'C:/Windows/Fonts/simsun.ttc',    # SimSun
-                    'C:/Windows/Fonts/NSimSun.ttf',   # NSimSun
-                ]
-                font_paths.extend(windows_fonts)
-            elif system == 'linux':
-                # Linux font paths
-                linux_fonts = [
-                    '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
-                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                ]
-                font_paths.extend(linux_fonts)
-            elif system == 'darwin':  # macOS
-                mac_fonts = [
-                    '/System/Library/Fonts/PingFang.ttc',
-                    '/System/Library/Fonts/STHeiti Light.ttc',
-                    '/System/Library/Fonts/STHeiti Medium.ttc',
-                ]
-                font_paths.extend(mac_fonts)
-            
-            # Try to load fonts
-            fonts_loaded = []
-            for fp in font_paths:
-                if os.path.exists(fp):
-                    try:
-                        fm.fontManager.addfont(fp)
-                        fonts_loaded.append(fp)
-                    except Exception as e:
-                        print(f"Warning: Could not load font {fp}: {e}")
-            
-            # Rebuild font cache if fonts were added
-            if fonts_loaded:
-                try:
-                    fm._load_fontmanager(try_read_cache=False)
-                except:
-                    pass
-            
-            chinese_fonts = [
-                'Noto Sans CJK SC',
-                'Noto Sans CJK TC',
-                'WenQuanYi Zen Hei',
-                'WenQuanYi Micro Hei',
-                'Microsoft YaHei',
-                'SimHei',
-                'PingFang SC',
-                'Source Han Sans CN',
-                'Heiti SC',
-                'SimSun',
-                'NSimSun',
-                'DejaVu Sans'
-            ]
-            matplotlib.rcParams['font.sans-serif'] = chinese_fonts
-            matplotlib.rcParams['axes.unicode_minus'] = False
-            
-            # Verify font availability
-            available_fonts = [f.name for f in fm.fontManager.ttflist]
-            chinese_available = [f for f in chinese_fonts if f in available_fonts]
-            
-            if chinese_available:
-                print(f"✓ Chinese fonts available: {chinese_available[0]}")
+        setup_style(self.language)
+
+    def _save(self, filename, **kwargs):
+        paths = save_figure(plt.gcf(), filename, formats=self.formats, **kwargs)
+        self.exported_files.extend(paths)
+        return paths
+
+    def _document_projection(self):
+        if self._projection is None:
+            from sklearn.decomposition import PCA
+            indices = np.sort(np.random.default_rng(42).choice(self.n_docs, min(5000, self.n_docs), replace=False))
+            sample = self.theta[indices]
+            if min(sample.shape) < 2:
+                self._projection_method = 'Coordinate'
+                coords = np.column_stack((sample[:, 0], np.zeros(len(sample))))
+            elif len(sample) < 5:
+                self._projection_method = 'PCA'
+                coords = PCA(n_components=2).fit_transform(sample)
             else:
-                print("⚠ Warning: No Chinese fonts found, text may appear as squares")
-                print("  Please install: apt-get install -y fonts-noto-cjk fonts-wqy-zenhei")
-        else:
-            # English font setup
-            font_paths = []
-            
-            if system == 'windows':
-                font_paths.extend([
-                    'C:/Windows/Fonts/arial.ttf',
-                    'C:/Windows/Fonts/calibri.ttf',
-                ])
-            elif system == 'linux':
-                font_paths.extend([
-                    '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
-                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                ])
-            
-            for fp in font_paths:
-                if os.path.exists(fp):
-                    try:
-                        fm.fontManager.addfont(fp)
-                    except:
-                        pass
-            
-            matplotlib.rcParams['font.sans-serif'] = ['Arial', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'DejaVu Sans']
-            matplotlib.rcParams['axes.unicode_minus'] = False
-    
+                self._projection_method = 'UMAP'
+                import umap
+                coords = umap.UMAP(n_components=2, random_state=42, n_jobs=1,
+                    n_neighbors=min(30, len(sample)-1), min_dist=.3, metric='cosine').fit_transform(sample)
+            self._projection = indices, sample, coords
+            pd.DataFrame({'matrix_row': indices, 'x': coords[:, 0], 'y': coords[:, 1],
+                          'dominant_topic': sample.argmax(axis=1)+1}).to_csv(self.global_dir / 'document_projection.csv', index=False)
+        return self._projection
+
     def _create_output_dirs(self):
         """Create output directory structure.
-        
+
         New Structure (language is handled at parent level):
             {output_dir}/
             ├── global/         # Global charts
@@ -209,12 +137,12 @@ class VisualizationGenerator:
         # Output directly to output_dir (language directory is handled by run_pipeline)
         self.global_dir = self.output_dir / 'global'
         self.topics_dir = self.output_dir / 'topic'
-        
+
         self.global_dir.mkdir(parents=True, exist_ok=True)
-        
+
         for i in range(self.n_topics):
             (self.topics_dir / f'topic_{i+1}').mkdir(parents=True, exist_ok=True)
-    
+
     def _get_label(self, key):
         """Get label based on language."""
         labels = {
@@ -249,6 +177,8 @@ class VisualizationGenerator:
             'train_loss': {'en': 'Train Loss', 'zh': '训练损失'},
             'val_loss': {'en': 'Validation Loss', 'zh': '验证损失'},
             'recon_loss': {'en': 'Reconstruction Loss', 'zh': '重构损失'},
+            'train_perplexity': {'en': 'Training perplexity', 'zh': '训练困惑度'},
+            'val_perplexity': {'en': 'Validation perplexity', 'zh': '验证困惑度'},
             'kl_loss': {'en': 'KL Loss', 'zh': 'KL损失'},
             'perplexity': {'en': 'Perplexity', 'zh': '困惑度'},
             'score': {'en': 'Score', 'zh': '分数'},
@@ -278,7 +208,7 @@ class VisualizationGenerator:
             'word_sense_evolution': {'en': 'Word Semantic Evolution', 'zh': '词语义演化'},
         }
         return labels.get(key, {}).get(self.language, key)
-    
+
     def _get_filename(self, key):
         """Get filename based on language (using chart title as filename)."""
         filenames = {
@@ -292,8 +222,6 @@ class VisualizationGenerator:
             'representative_topic_evolution': {'en': 'Representative Topic Evolution.png', 'zh': '代表性主题演化.png'},
             'kl_divergence': {'en': 'Topic Distribution KL Divergence Over Time.png', 'zh': '主题分布KL散度时序变化.png'},
             'vocab_evolution': {'en': 'High-Frequency Word Evolution.png', 'zh': '高频词演变.png'},
-            'topic_sankey': {'en': 'Topic Evolution Sankey Diagram.png', 'zh': '主题演化桑基图.png'},
-            'topic_sankey_html': {'en': 'Topic Evolution Sankey Diagram.html', 'zh': '主题演化桑基图.html'},
             'topic_similarity_evolution': {'en': 'Topic Distribution Similarity Evolution.png', 'zh': '主题分布相似度演化.png'},
             'all_topics_strength_table': {'en': 'Topic Strength by Year.png', 'zh': '各年度主题强度.png'},
             'dim_heatmap': {'en': 'Dimension-Topic Heatmap.png', 'zh': '维度-主题热力图.png'},
@@ -314,7 +242,7 @@ class VisualizationGenerator:
             'word_sense_evolution': {'en': 'Word Semantic Evolution.png', 'zh': '词语义演化.png'},
         }
         return filenames.get(key, {}).get(self.language, f'{key}.png')
-    
+
     def _get_title(self, key):
         """Get chart title based on language."""
         titles = {
@@ -328,7 +256,6 @@ class VisualizationGenerator:
             'representative_topic_evolution': {'en': 'Representative Topic Evolution', 'zh': '代表性主题演化'},
             'kl_divergence': {'en': 'Topic Distribution KL Divergence Over Time', 'zh': '主题分布KL散度时序变化'},
             'vocab_evolution': {'en': 'High-Frequency Word Evolution', 'zh': '高频词演变'},
-            'topic_sankey': {'en': 'Topic Evolution Sankey Diagram', 'zh': '主题演化桑基图'},
             'topic_similarity_evolution': {'en': 'Topic Distribution Similarity Evolution', 'zh': '主题分布相似度演化'},
             'all_topics_strength_table': {'en': 'Topic Strength by Year', 'zh': '各年度主题强度'},
             'dim_heatmap': {'en': 'Dimension-Topic Heatmap', 'zh': '维度-主题热力图'},
@@ -344,171 +271,145 @@ class VisualizationGenerator:
             'word_distribution_change': {'en': 'Word Distribution Change', 'zh': '词分布变化'},
         }
         return titles.get(key, {}).get(self.language, key)
-    
+
     # ========== GLOBAL CHARTS ==========
-    
-    def generate_topic_table(self):
-        """Generate topic identification result table (CSV only, no PNG)."""
+
+    def generate_topic_table(self, strength_label='strength'):
+        """Export full topic table and readable figure pages."""
         # Prepare data for CSV
         csv_data = []
         for topic_id, words in self.topic_words:
             top_words = [w[0] for w in words[:10]]
             strength = self.theta[:, topic_id].mean()
             topic_name = f"{top_words[0]}, {top_words[1]}" if len(top_words) >= 2 else top_words[0]
-            
+
             csv_data.append({
                 'topic_id': topic_id + 1,
                 'topic_name': topic_name,
-                'strength': strength,
+                strength_label: strength,
                 'keywords': ', '.join(top_words)
             })
-        
+
         # Save CSV to global directory
         csv_df = pd.DataFrame(csv_data)
         csv_filename = '主题表.csv' if self.language == 'zh' else 'topic_table.csv'
         csv_path = self.global_dir / csv_filename
         csv_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
         print(f"  ✓ {csv_filename}")
-    
-    def generate_topic_network(self):
-        """Generate topic correlation network graph."""
-        import networkx as nx
-        
-        topic_corr = np.corrcoef(self.theta.T)
-        
-        G = nx.Graph()
-        
-        for i in range(self.n_topics):
-            if i < len(self.topic_words):
-                top_words = [w[0] for w in self.topic_words[i][1][:3]]
-                label = f"{self._get_label('topic')}{i+1}: {', '.join(top_words)}" if self.language == 'zh' else f"T{i+1}: {', '.join(top_words)}"
-            else:
-                label = f"{self._get_label('topic')} {i+1}" if self.language == 'zh' else f"Topic {i+1}"
-            G.add_node(i, label=label)
-        
-        threshold = 0.3
-        for i in range(self.n_topics):
-            for j in range(i+1, self.n_topics):
-                if topic_corr[i, j] > threshold:
-                    G.add_edge(i, j, weight=topic_corr[i, j])
-        
-        # Increase figure size and add margins to prevent clipping
-        fig, ax = plt.subplots(figsize=(16, 12))
-        
-        # Use scale parameter to keep nodes within bounds
-        pos = nx.spring_layout(G, k=2, iterations=50, seed=42, scale=0.8)
-        
-        topic_strengths = self.theta.mean(axis=0)
-        node_sizes = 800 + topic_strengths * 4000
-        
-        edges = G.edges(data=True)
-        edge_weights = [e[2].get('weight', 0.5) for e in edges]
-        nx.draw_networkx_edges(G, pos, ax=ax, width=[w*3 for w in edge_weights],
-                              alpha=0.5, edge_color='gray')
-        
-        colors = plt.cm.Set3(np.linspace(0, 1, self.n_topics))
-        nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes,
-                              node_color=colors, alpha=0.8)
-        
-        labels = nx.get_node_attributes(G, 'label')
-        nx.draw_networkx_labels(G, pos, labels, ax=ax, font_size=8)
-        
-        ax.axis('off')
-        
-        # Add margins to prevent content from being clipped
-        ax.margins(0.15)
-        
-        plt.tight_layout(pad=1.5)
-        plt.savefig(self.global_dir / self._get_filename('topic_network'), dpi=self.dpi, 
-                   bbox_inches='tight', pad_inches=0.5, facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_network')}")
-    
-    def generate_doc_clusters(self):
-        """Generate document clustering visualization with UMAP (publication quality)."""
-        try:
-            import umap
-        except ImportError:
-            print("  ⚠ doc_clusters skipped (umap not installed, run: pip install umap-learn)")
+        for start in range(0, self.n_topics, 12):
+            entries = csv_data[start:start+12]
+            values = [[f"T{row['topic_id']}", ' · '.join(row['keywords'].split(', ')[:5]), f"{row[strength_label]:.4f}"] for row in entries]
+            fig, ax = plt.subplots(figsize=(7.1, .34*len(entries)+.65))
+            ax.axis('off')
+            headers = ['主题', '代表词（模型排序）', '平均权重'] if self.language=='zh' else ['Topic','Top exported terms','Mean weight']
+            if strength_label == 'mean_latent_coordinate': headers[-1] = 'Mean coordinate'
+            table = ax.table(cellText=values,colLabels=headers,colWidths=[.1,.7,.2],cellLoc='left',bbox=[0,0,1,1])
+            table.auto_set_font_size(False);table.set_fontsize(9)
+            for (row,col), cell in table.get_celld().items():
+                cell.visible_edges='B';cell.set_edgecolor('#DFE4E8');cell.set_linewidth(.5)
+                if col==2:cell.get_text().set_ha('right')
+                if row>0 and col==0:cell.set_text_props(color=COLORS[(entries[row-1]['topic_id']-1)%len(COLORS)],weight='bold')
+                cell.set_facecolor('white')
+                if row==0: cell.set_text_props(weight='bold',color='#164563')
+            self._save(self.global_dir/f'topic_table_{start//12+1}.png',dpi=self.dpi)
+            plt.close(fig)
+
+    def generate_topic_network(self, layout="arc", threshold=.3):
+        """Fixed-order arc network: layout does not imply distance or clusters."""
+        from matplotlib.path import Path as MplPath
+        from matplotlib.patches import PathPatch
+        from matplotlib.lines import Line2D
+        if layout not in {'arc','circular'} or not 0 <= threshold < 1:
+            raise ValueError('Use arc/circular layout and 0 <= threshold < 1')
+        if self.n_topics < 2:
+            print('[SKIP] topic_network: correlation requires at least two topics')
             return
-        
-        n_samples = min(10000, self.n_docs)
-        indices = np.random.choice(self.n_docs, n_samples, replace=False)
-        theta_sample = self.theta[indices]
-        
-        # UMAP with better parameters for visualization
-        reducer = umap.UMAP(
-            n_components=2, 
-            random_state=42, 
-            n_neighbors=30,
-            min_dist=0.3,
-            spread=1.0,
-            metric='cosine'
-        )
-        coords = reducer.fit_transform(theta_sample)
-        
-        dominant_topics = np.argmax(theta_sample, axis=1)
-        
-        # Vibrant, distinct colors similar to reference image
-        color_palette = [
-            '#E24A33', '#348ABD', '#988ED5', '#777777', '#FBC15E',
-            '#8EBA42', '#FFB5B8', '#56B4E9', '#009E73', '#F0E442',
-            '#0072B2', '#D55E00', '#CC79A7', '#E69F00', '#999999',
-            '#66C2A5', '#FC8D62', '#8DA0CB', '#E78AC3', '#A6D854'
-        ]
-        colors = [color_palette[i % len(color_palette)] for i in range(self.n_topics)]
-        
-        fig, ax = plt.subplots(figsize=(10, 10), facecolor='white')
-        ax.set_facecolor('white')
-        
-        # Plot each topic with small dots, no edge
-        for topic_id in range(self.n_topics):
-            mask = dominant_topics == topic_id
-            if mask.sum() > 0:
-                topic_label = f"{self._get_label('topic')} {topic_id+1}"
-                ax.scatter(
-                    coords[mask, 0], coords[mask, 1],
-                    c=colors[topic_id], 
-                    s=3,  # Small dots like reference
-                    alpha=0.8,
-                    label=topic_label,
-                    rasterized=True,
-                    linewidths=0  # No edge
-                )
-        
-        # Keep axes with labels, remove grid
-        ax.set_xlabel(self._get_label('umap1'), fontsize=11)
-        ax.set_ylabel(self._get_label('umap2'), fontsize=11)
-        ax.tick_params(axis='both', labelsize=9)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.grid(False)  # Remove grid lines
-        
-        # Compact legend
-        legend = ax.legend(
-            loc='upper left', 
-            bbox_to_anchor=(1.01, 1),
-            fontsize=8,
-            frameon=False,
-            markerscale=3,
-            handletextpad=0.3,
-            borderpad=0.2
-        )
-        
-        # Remove figure caption as requested
-        # caption = f"{self._get_label('figure')}: {self._get_label('doc_clustering_caption')} (n={n_samples:,}, K={self.n_topics})"
-        # fig.text(0.5, 0.02, caption, ha='center', fontsize=10, style='italic')
-        
-        plt.tight_layout(rect=[0, 0.05, 1, 1])
-        plt.savefig(self.global_dir / self._get_filename('doc_clusters'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('doc_clusters')}")
-    
+        corr=np.corrcoef(self.theta.T)
+        edges=[(i,j,float(corr[i,j])) for i in range(self.n_topics) for j in range(i+1,self.n_topics)
+               if np.isfinite(corr[i,j]) and abs(corr[i,j])>threshold]
+        if layout=='circular':
+            self._draw_circular_network(edges,threshold)
+            return
+        fig,ax=plt.subplots(figsize=(6.5,max(3,self.n_topics*.43)))
+        widest=max([.45+.22*(j-i) for i,j,_ in edges],default=.6)
+        for i,j,value in sorted(edges,key=lambda e:-(e[1]-e[0])):
+            y1,y2=self.n_topics-1-i,self.n_topics-1-j
+            bend=.45+.22*(j-i)
+            curve=MplPath([(0,y1),(-bend,y1),(-bend,y2),(0,y2)],
+                          [MplPath.MOVETO,MplPath.CURVE4,MplPath.CURVE4,MplPath.CURVE4])
+            color=COLORS[0] if value>0 else COLORS[1]
+            ax.add_patch(PathPatch(curve,fill=False,color=color,lw=.7+abs(value)*2.5,
+                                  linestyle='-' if value>0 else '--',alpha=.85))
+            if len(edges)<=16:
+                ax.text(-.75*bend,(y1+y2)/2,f'{value:+.2f}',ha='center',va='center',fontsize=8,
+                        color=color,bbox=dict(facecolor='white',edgecolor='none',pad=1.8))
+        terms=dict(self.topic_words)
+        for i in range(self.n_topics):
+            y=self.n_topics-1-i;color=COLORS[i%len(COLORS)]
+            ax.scatter([0],[y],s=70,c='white',edgecolors=color,linewidths=1.8,zorder=4)
+            ax.text(.18,y,f'T{i+1}',va='center',color=color,weight='bold',fontsize=9)
+            ax.text(.65,y,' · '.join(w for w,_ in terms.get(i,[])[:3]),va='center',fontsize=9)
+        ax.set_xlim(-widest-.25,3.2);ax.set_ylim(-.65,self.n_topics-.35);ax.axis('off')
+        title='主题相关网络' if self.language=='zh' else 'Topic correlation network'
+        ax.set_title(f'{title} · Pearson |r| > {threshold:g}',pad=24)
+        handles=[Line2D([],[],color=COLORS[0],label='正相关' if self.language=='zh' else 'Positive'),
+                 Line2D([],[],color=COLORS[1],linestyle='--',label='负相关' if self.language=='zh' else 'Negative')]
+        ax.legend(handles=handles,loc='upper left',bbox_to_anchor=(0,-.11),ncol=2)
+        ax.text(0,-.06,('固定主题顺序；弧线位置不表示距离。' if self.language=='zh' else 'Fixed topic order; arc position does not encode distance.')+
+                (f' 共 {len(edges)} 条边。' if self.language=='zh' else f' {len(edges)} edges.'),transform=ax.transAxes,fontsize=7,color='#667C8A')
+        pd.DataFrame(corr,index=np.arange(self.n_topics)+1,columns=np.arange(self.n_topics)+1).to_csv(self.global_dir/'topic_correlations.csv',index_label='topic_id')
+        pd.DataFrame([(i+1,j+1,r) for i,j,r in edges],columns=['source_topic','target_topic','pearson_r']).to_csv(self.global_dir/'topic_network_edges.csv',index=False)
+        self._save(self.global_dir/self._get_filename('topic_network'),dpi=self.dpi);plt.close(fig)
+
+    def _draw_circular_network(self, edges, threshold):
+        """Fixed circular geometry with a separate key: no labels on crossing edges."""
+        from matplotlib.lines import Line2D
+        from textwrap import fill
+        fig,(ax,key)=plt.subplots(1,2,figsize=(7.15,min(6.5,max(4.3,self.n_topics*.32))),
+                                  width_ratios=[1.65,1],layout='constrained')
+        angles=np.pi/2+np.arange(self.n_topics)*2*np.pi/self.n_topics
+        positions=np.c_[np.cos(angles),np.sin(angles)]
+        for i,j,value in edges:
+            ax.plot(*positions[[i,j]].T,color=COLORS[0] if value>0 else COLORS[1],
+                    lw=.6+abs(value)*2,alpha=.55,linestyle='-' if value>0 else '--',zorder=1)
+        size=max(100,550*min(1,8/self.n_topics))
+        for i,(x,y) in enumerate(positions):
+            ax.scatter([x],[y],s=size,color=COLORS[i%len(COLORS)],edgecolors='white',linewidths=1.5,zorder=3)
+            ax.text(x,y,f'T{i+1}',ha='center',va='center',fontsize=8,color='white',zorder=4)
+        ax.set(xlim=(-1.22,1.22),ylim=(-1.22,1.22),aspect='equal');ax.axis('off');key.axis('off')
+        rows=[f'T{i+1}  '+fill(' · '.join(w for w,_ in dict(self.topic_words).get(i,[])[:3]),22)
+              for i in range(self.n_topics)]
+        # Edge values occupy their own block, never the network's dense intersections.
+        visible=sorted(edges,key=lambda e:-abs(e[2]))[:10]
+        labels=[f'T{i+1}–T{j+1}   r = {value:+.3f}' for i,j,value in visible]
+        heading='相关系数' if self.language=='zh' else 'Pearson correlation'
+        if len(edges)>10:heading+=' · '+('前 10 条；全部见 CSV' if self.language=='zh' else 'top 10; all in CSV')
+        content='\n\n'.join(rows)+'\n\n'+heading+'\n'+'\n'.join(labels or ['—'])
+        # Use the existing companion topic table for large K instead of shrinking text.
+        if self.n_topics>10:
+            content=('主题说明见主题表；全部相关系数见 CSV。' if self.language=='zh' else 'Topic descriptions: topic table. All correlations: CSV.')
+        key.text(0,1,content,transform=key.transAxes,va='top',fontsize=7,linespacing=1.25)
+        fig.suptitle(('主题相关性网络 · 环形' if self.language=='zh' else 'Topic correlation network · circular')+
+                     f' · Pearson |r| > {threshold:g}',fontsize=10)
+        handles=[Line2D([],[],color=COLORS[0],label='正相关' if self.language=='zh' else 'Positive'),
+                 Line2D([],[],color=COLORS[1],linestyle='--',label='负相关' if self.language=='zh' else 'Negative')]
+        fig.legend(handles=handles,loc='outside lower center',ncol=2)
+        pd.DataFrame([(i+1,j+1,r) for i,j,r in edges],columns=['source_topic','target_topic','pearson_r']).to_csv(
+            self.global_dir/'topic_network_circular_edges.csv',index=False)
+        self._save(self.global_dir/'topic_network_circular.png',dpi=self.dpi);plt.close(fig)
+
+    def generate_doc_clusters(self):
+        from visualization.topic_visualizer import draw_document_projection
+        indices, sample, coords = self._document_projection()
+        fig = draw_document_projection(coords, np.argmax(sample,axis=1), method=self._projection_method,
+                                       language=self.language,total_count=self.n_docs)
+        self._save(self.global_dir/self._get_filename('doc_clusters'),dpi=self.dpi)
+        plt.close(fig)
+
     def generate_clustering_heatmap(self):
         """
         Generate hierarchical clustering heatmap with dendrogram.
-        
+
         Layout matches reference style:
         - Left dendrogram with topic labels on left side of heatmap
         - Top dendrogram with topic labels on bottom of heatmap
@@ -518,1226 +419,531 @@ class VisualizationGenerator:
         import seaborn as sns
         from scipy.cluster.hierarchy import linkage, dendrogram
         from scipy.spatial.distance import squareform
-        
+
         # Filter out zero-variance topics (e.g., HDP may have empty topics)
         # This prevents NaN in correlation matrix
         theta_filtered = self.theta.copy()
         topic_variances = np.var(theta_filtered, axis=0)
         valid_topics = topic_variances > 1e-10
         n_valid = valid_topics.sum()
-        
+
         if n_valid < 2:
             print(f"  ⚠ clustering_heatmap skipped (only {n_valid} valid topics)")
             return
-        
+
         if n_valid < self.n_topics:
             print(f"  ⚠ Filtering {self.n_topics - n_valid} zero-variance topics for heatmap")
             theta_filtered = theta_filtered[:, valid_topics]
-        
+
         topic_corr = np.corrcoef(theta_filtered.T)
-        
+
         # Handle any remaining NaN/Inf values
         topic_corr = np.nan_to_num(topic_corr, nan=0.0, posinf=1.0, neginf=-1.0)
-        
+
         # Create topic labels based on language (only for valid topics)
         valid_indices = np.where(valid_topics)[0]
         if n_valid > 20:
             topic_labels = [f"{self._get_label('topic')}{valid_indices[i]+1}" if self.language == 'zh' else f"T{valid_indices[i]+1}" for i in range(n_valid)]
         else:
             topic_labels = [f"{self._get_label('topic')} {valid_indices[i]+1}" if self.language == 'zh' else f"Topic {valid_indices[i]+1}" for i in range(n_valid)]
-        
+
         # Compute linkage for hierarchical clustering
         # Convert correlation to distance (1 - correlation), ensure symmetric
         dist_matrix = 1 - topic_corr
         dist_matrix = (dist_matrix + dist_matrix.T) / 2  # Ensure symmetry
         np.fill_diagonal(dist_matrix, 0)
-        
+
         # Ensure no NaN/Inf in distance matrix
         dist_matrix = np.nan_to_num(dist_matrix, nan=1.0, posinf=2.0, neginf=0.0)
         dist_matrix = np.clip(dist_matrix, 0, 2)  # Correlation distance should be in [0, 2]
-        
+
         condensed_dist = squareform(dist_matrix, checks=False)
-        linkage_matrix = linkage(condensed_dist, method='ward')
-        
-        # Create figure with square layout
-        fig = plt.figure(figsize=(12, 12), facecolor='white')
-        
-        ax_dendro_left = fig.add_axes([0.02, 0.12, 0.10, 0.62])  # Left dendrogram
-        ax_dendro_top = fig.add_axes([0.18, 0.78, 0.62, 0.10])   # Top dendrogram
-        ax_heatmap = fig.add_axes([0.18, 0.12, 0.62, 0.62])      # Square heatmap
-        ax_colorbar = fig.add_axes([0.83, 0.12, 0.02, 0.62])     # Colorbar
-        
-        dendro_left = dendrogram(linkage_matrix, orientation='left', ax=ax_dendro_left, 
-                                  no_labels=True, color_threshold=0, above_threshold_color='#1f77b4')
-        ax_dendro_left.set_xticks([])
-        ax_dendro_left.set_yticks([])
-        ax_dendro_left.set_ylim(n_valid * 10, 0)
-        ax_dendro_left.spines['top'].set_visible(False)
-        ax_dendro_left.spines['right'].set_visible(False)
-        ax_dendro_left.spines['bottom'].set_visible(False)
-        ax_dendro_left.spines['left'].set_visible(False)
-        
-        dendro_top = dendrogram(linkage_matrix, orientation='top', ax=ax_dendro_top,
-                                 no_labels=True, color_threshold=0, above_threshold_color='#1f77b4')
-        ax_dendro_top.set_xticks([])
-        ax_dendro_top.set_yticks([])
-        ax_dendro_top.set_xlim(0, n_valid * 10)
-        ax_dendro_top.spines['top'].set_visible(False)
-        ax_dendro_top.spines['right'].set_visible(False)
-        ax_dendro_top.spines['bottom'].set_visible(False)
-        ax_dendro_top.spines['left'].set_visible(False)
-        
-        # Reorder correlation matrix based on dendrogram
-        order = dendro_left['leaves']
-        topic_corr_ordered = topic_corr[order, :][:, order]
-        labels_ordered = [topic_labels[i] for i in order]
-        
-        im = ax_heatmap.imshow(topic_corr_ordered, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
-        
-        ax_heatmap.set_xlim(-0.5, n_valid - 0.5)
-        ax_heatmap.set_ylim(n_valid - 0.5, -0.5)
-        
-        # Set tick labels
-        fontsize = 7 if n_valid > 20 else 9
-        ax_heatmap.set_xticks(range(n_valid))
-        ax_heatmap.set_yticks(range(n_valid))
-        
-        # Move X-axis labels to top
-        ax_heatmap.xaxis.tick_top()  # Move X-axis ticks and labels to top
-        ax_heatmap.set_xticklabels(labels_ordered, rotation=45, ha='left', fontsize=fontsize)
-        ax_heatmap.yaxis.tick_left()
-        ax_heatmap.set_yticklabels(labels_ordered, fontsize=fontsize)
-        
-        # Add colorbar on the right
-        cbar = fig.colorbar(im, cax=ax_colorbar)
-        cbar.set_label(self._get_label('correlation'), fontsize=10, rotation=270, labelpad=15)
-        
-        plt.savefig(self.global_dir / self._get_filename('clustering_heatmap'), dpi=self.dpi, 
-                    bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('clustering_heatmap')}")
-    
+        linkage_matrix = linkage(condensed_dist, method='average')
+
+        fig = plt.figure(figsize=(6.1,4.7),layout='constrained')
+        fig._theta_no_panel_labels=True
+        grid=fig.add_gridspec(1,3,width_ratios=[1,5,.22])
+        tree=fig.add_subplot(grid[0,0]);ax=fig.add_subplot(grid[0,1]);bar=fig.add_subplot(grid[0,2])
+        leaves=dendrogram(linkage_matrix,orientation='left',ax=tree,no_labels=True,
+                          color_threshold=0,above_threshold_color='#667C8A')['leaves']
+        tree.set_ylim(n_valid*10,0);tree.axis('off')
+        ordered=topic_corr[np.ix_(leaves,leaves)]
+        sns.heatmap(ordered,ax=ax,cbar_ax=bar,cmap='RdBu_r',vmin=-1,vmax=1,linewidths=.6,
+                    annot=bool(n_valid<=12),fmt='.2f',annot_kws={'fontsize':7.5},
+                    xticklabels=[f'T{valid_indices[i]+1}' for i in leaves],
+                    yticklabels=[f'T{valid_indices[i]+1}' for i in leaves],
+                    cbar_kws={'label':'Pearson r'})
+        ax.tick_params(axis='both',rotation=0)
+        ax.set_title('主题权重相关性' if self.language=='zh' else 'Topic-weight correlations')
+        self._save(self.global_dir/self._get_filename('clustering_heatmap'),dpi=self.dpi);plt.close(fig)
+
     def generate_clusters_with_outliers(self):
-        """Generate document clusters with outlier detection using UMAP (publication quality)."""
-        try:
-            import umap
-        except ImportError:
-            print("  ⚠ clusters_outliers skipped (umap not installed, run: pip install umap-learn)")
-            return
+        from visualization.topic_visualizer import draw_document_projection
         from sklearn.cluster import DBSCAN
-        
-        n_samples = min(10000, self.n_docs)
-        indices = np.random.choice(self.n_docs, n_samples, replace=False)
-        theta_sample = self.theta[indices]
-        
-        # UMAP with better parameters
-        reducer = umap.UMAP(
-            n_components=2, 
-            random_state=42, 
-            n_neighbors=30,
-            min_dist=0.3,
-            spread=1.0,
-            metric='cosine'
-        )
-        coords = reducer.fit_transform(theta_sample)
-        
-        # Adaptive DBSCAN eps based on data spread
         from sklearn.neighbors import NearestNeighbors
-        nn = NearestNeighbors(n_neighbors=10)
-        nn.fit(coords)
-        distances, _ = nn.kneighbors(coords)
-        eps_value = np.percentile(distances[:, -1], 90)
-        
-        dbscan = DBSCAN(eps=eps_value, min_samples=5)
-        labels = dbscan.fit_predict(coords)
-        
-        fig, ax = plt.subplots(figsize=(10, 10), facecolor='white')
-        ax.set_facecolor('white')
-        
-        dominant_topics = np.argmax(theta_sample, axis=1)
-        
-        # Vibrant colors
-        color_palette = [
-            '#E24A33', '#348ABD', '#988ED5', '#777777', '#FBC15E',
-            '#8EBA42', '#FFB5B8', '#56B4E9', '#009E73', '#F0E442',
-            '#0072B2', '#D55E00', '#CC79A7', '#E69F00', '#999999',
-            '#66C2A5', '#FC8D62', '#8DA0CB', '#E78AC3', '#A6D854'
-        ]
-        colors = [color_palette[i % len(color_palette)] for i in range(self.n_topics)]
-        
-        mask_normal = labels != -1
-        for topic_id in range(self.n_topics):
-            topic_mask = (dominant_topics == topic_id) & mask_normal
-            if topic_mask.sum() > 0:
-                topic_label = f"{self._get_label('topic')} {topic_id+1}"
-                ax.scatter(
-                    coords[topic_mask, 0], coords[topic_mask, 1],
-                    c=colors[topic_id], 
-                    s=3,
-                    alpha=0.8,
-                    label=topic_label,
-                    rasterized=True,
-                    linewidths=0
-                )
-        
-        # Outliers as small gray dots
-        mask_outlier = labels == -1
-        n_outliers = mask_outlier.sum()
-        if n_outliers > 0:
-            outlier_label = f'{self._get_label("outliers")} (n={n_outliers})'
-            ax.scatter(
-                coords[mask_outlier, 0], coords[mask_outlier, 1],
-                c='#CCCCCC', 
-                s=2, 
-                alpha=0.5,
-                label=outlier_label,
-                rasterized=True,
-                linewidths=0
-            )
-        
-        # Keep axes with labels, remove grid
-        ax.set_xlabel(self._get_label('umap1'), fontsize=11)
-        ax.set_ylabel(self._get_label('umap2'), fontsize=11)
-        ax.tick_params(axis='both', labelsize=9)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.grid(False)  # Remove grid lines
-        
-        # Compact legend
-        legend = ax.legend(
-            loc='upper left', 
-            bbox_to_anchor=(1.01, 1),
-            fontsize=8,
-            frameon=False,
-            markerscale=3,
-            handletextpad=0.3,
-            borderpad=0.2
-        )
-        
-        # Remove figure caption as requested
-        # caption = f"{self._get_label('figure')}: {self._get_label('doc_clusters_outliers_caption')} (n={n_samples:,}, {self._get_label('outliers')}={n_outliers})"
-        # fig.text(0.5, 0.02, caption, ha='center', fontsize=10, style='italic')
-        
-        plt.tight_layout(rect=[0, 0.05, 1, 1])
-        plt.savefig(self.global_dir / self._get_filename('clusters_outliers'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('clusters_outliers')}")
-    
+        indices, sample, coords = self._document_projection()
+        distances, _ = NearestNeighbors(n_neighbors=min(10,len(coords))).fit(coords).kneighbors(coords)
+        labels = DBSCAN(eps=max(float(np.percentile(distances[:,-1],90)),1e-8),min_samples=5).fit_predict(coords)
+        topics = np.argmax(sample,axis=1); topics[labels == -1] = -1
+        title = '投影 DBSCAN 诊断（非模型离群标签）' if self.language=='zh' else 'Projection DBSCAN diagnostic (not model outliers)'
+        fig = draw_document_projection(coords,topics,method=self._projection_method,language=self.language,
+                                       total_count=self.n_docs,title=title)
+        self._save(self.global_dir/self._get_filename('clusters_outliers'),dpi=self.dpi)
+        plt.close(fig)
+
     def generate_topic_proportion_pie(self):
-        """Generate topic proportion pie chart showing top 10 topics + Others."""
-        # Calculate topic proportions
-        topic_props = self.theta.mean(axis=0)
-        
-        # Ensure non-negative values (some models like NVDM may have negative values)
-        topic_props = np.maximum(topic_props, 0)
-        
-        # Skip if all zeros
-        if topic_props.sum() == 0:
-            print(f"  [SKIP] {self._get_filename('topic_proportion_pie')} (no positive proportions)")
-            return
-        
-        # Get top 10 topics
-        top_k = min(10, self.n_topics)
-        top_indices = np.argsort(topic_props)[-top_k:][::-1]
-        
-        # Prepare data
-        labels = []
-        sizes = []
-        for idx in top_indices:
-            if idx < len(self.topic_words):
-                top_words = [w[0] for w in self.topic_words[idx][1][:2]]
-                label = f"{self._get_label('topic')}{idx+1}: {', '.join(top_words)}" if self.language == 'zh' else f"T{idx+1}: {', '.join(top_words)}"
-            else:
-                label = f"{self._get_label('topic')} {idx+1}" if self.language == 'zh' else f"Topic {idx+1}"
-            labels.append(label)
-            sizes.append(topic_props[idx])
-        
-        # Add "Others" if there are more topics
-        if self.n_topics > top_k:
-            other_prop = sum(topic_props[i] for i in range(self.n_topics) if i not in top_indices)
-            if other_prop > 0.001:
-                labels.append('Others' if self.language == 'en' else '其他')
-                sizes.append(other_prop)
-        
-        # Normalize
-        total = sum(sizes)
-        sizes = [s / total for s in sizes]
-        
-        # Custom color palette
-        pie_colors = [
-            '#22577A',  # Deep Blue
-            '#5584AC',  # Medium Blue
-            '#95D1CC',  # Light Teal
-            '#E4FBFF',  # Very Light Cyan
-            '#B4ECE3',  # Mint
-            '#F4F9F9',  # Off White
-            '#A6D6D6',  # Soft Teal
-            '#9DC6A7',  # Sage Green
-        ]
-        colors = [pie_colors[i % len(pie_colors)] for i in range(len(labels))]
-        
-        # Create pie chart
-        fig, ax = plt.subplots(figsize=(12, 10))
-        
-        # Add percentage to labels
-        labels_with_pct = [f"{label}\n({size*100:.1f}%)" for label, size in zip(labels, sizes)]
-        
-        wedges, texts = ax.pie(
-            sizes, 
-            labels=labels_with_pct,
-            colors=colors,
-            startangle=90,
-            wedgeprops=dict(width=0.7, edgecolor='white', linewidth=2)
-        )
-        
-        # Adjust label font size
-        for text in texts:
-            text.set_fontsize(8)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_proportion_pie'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_proportion_pie')}")
-    
+        """Ranked bars avoid crowded pie labels and preserve exact mean membership."""
+        values = self.theta.mean(axis=0)
+        indices = np.argsort(-values)[:20]
+        labels = [f'T{i+1}  ' + ' · '.join(w for w, _ in self.topic_words[i][1][:2]) for i in indices]
+        fig, ax = plt.subplots(figsize=(6.4, max(2.6, .30 * len(indices))))
+        ax.hlines(range(len(indices)), 0, values[indices]*100, color='#C8CED3', linewidth=1.2)
+        ax.scatter(values[indices]*100, range(len(indices)), color=[COLORS[i % len(COLORS)] for i in indices], s=26, zorder=3)
+        ax.set_yticks(range(len(indices)), labels)
+        ax.invert_yaxis()
+        ax.set_xlim(0, max(values[indices])*108)
+        ax.spines['left'].set_visible(False);ax.tick_params(axis='y',length=0)
+        for y, value in enumerate(values[indices]):
+            ax.text(1.01,y,f'{value:.1%}',transform=ax.get_yaxis_transform(),va='center')
+        ax.set_xlabel('平均文档主题权重（%）' if self.language == 'zh' else 'Mean document-topic weight (%)')
+        ax.set_title(f'K={self.n_topics} · N={self.n_docs:,}')
+        ax.grid(axis='x', alpha=.5)
+        pd.DataFrame({'topic_id': np.arange(self.n_topics)+1, 'mean_weight': values}).to_csv(self.global_dir/'topic_proportions.csv',index=False)
+        fig.tight_layout()
+        self._save(self.global_dir / self._get_filename('topic_proportion_pie'), dpi=self.dpi)
+        plt.close(fig)
+
     def generate_representative_topic_evolution(self):
-        """Generate representative topic evolution chart with smoothed curves."""
-        if self.timestamps is None:
-            print("  [SKIP] representative_topic_evolution (no timestamps)")
-            return
-        
-        years = np.array([t.year for t in self.timestamps])
-        unique_years = sorted(set(years))
-        
-        if len(unique_years) < 2:
-            print("  [SKIP] representative_topic_evolution (need at least 2 years)")
-            return
-        
-        # Select top 5 topics by average strength
-        topic_strengths = self.theta.mean(axis=0)
-        top_topics = np.argsort(topic_strengths)[-5:][::-1]
-        
-        # Calculate proportions per year for each topic
-        topic_year_props = {}
-        for topic_idx in top_topics:
-            props = []
-            for year in unique_years:
-                mask = years == year
-                props.append(self.theta[mask, topic_idx].mean())
-            topic_year_props[topic_idx] = props
-        
-        fig, ax = plt.subplots(figsize=(14, 8))
-        colors = ['#4472C4', '#ED7D31', '#70AD47', '#FFC000', '#9B7BB8']
-        
-        for i, topic_idx in enumerate(top_topics):
-            props = topic_year_props[topic_idx]
-            if topic_idx < len(self.topic_words):
-                top_words = [w[0] for w in self.topic_words[topic_idx][1][:2]]
-                label = f"{self._get_label('topic')}{topic_idx+1}: {', '.join(top_words)}" if self.language == 'zh' else f"T{topic_idx+1}: {', '.join(top_words)}"
-            else:
-                label = f"{self._get_label('topic')} {topic_idx+1}" if self.language == 'zh' else f"Topic {topic_idx+1}"
-            
-            # Smoothed curve
-            if len(unique_years) >= 4:
-                from scipy.interpolate import make_interp_spline
-                try:
-                    x_arr = np.array(unique_years)
-                    y_arr = np.array(props)
-                    x_smooth = np.linspace(x_arr.min(), x_arr.max(), 300)
-                    spl = make_interp_spline(x_arr, y_arr, k=3)
-                    y_smooth = spl(x_smooth)
-                    ax.plot(x_smooth, y_smooth, color=colors[i], linewidth=2.5, label=label)
-                    ax.scatter(unique_years, props, color=colors[i], s=50, zorder=5)
-                except:
-                    ax.plot(unique_years, props, 'o-', color=colors[i], linewidth=2, markersize=8, label=label)
-            else:
-                ax.plot(unique_years, props, 'o-', color=colors[i], linewidth=2, markersize=8, label=label)
-        
-        ax.set_xlabel(self._get_label('year'), fontsize=12)
-        ax.set_ylabel(self._get_label('proportion'), fontsize=12)
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('representative_topic_evolution'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('representative_topic_evolution')}")
-    
+        if self.timestamps is None: return
+        from matplotlib.ticker import PercentFormatter, MaxNLocator
+        years = np.array([t.year for t in self.timestamps]); periods=np.arange(years.min(),years.max()+1)
+        if len(periods)<2: return
+        topics=np.argsort(-self.theta.mean(axis=0))[:5]
+        fig,axes=plt.subplots(len(topics),1,figsize=(6.6, max(2,1.1*len(topics))),sharex=True,sharey=True,layout='constrained',squeeze=False)
+        fig._theta_no_panel_labels=True
+        for ax,topic in zip(axes[:,0],topics):
+            values=[self.theta[years==y,topic].mean() if (years==y).any() else np.nan for y in periods]
+            ax.plot(periods,values,'o-',color=COLORS[topic%len(COLORS)],markersize=3)
+            ax.set_title(f'T{topic+1}  '+ ' · '.join(w for w,_ in self.topic_words[topic][1][:2]),fontsize=9)
+            ax.yaxis.set_major_formatter(PercentFormatter(1));ax.yaxis.set_major_locator(MaxNLocator(nbins=3));ax.set_ylim(bottom=0)
+        maximum=max(np.max(self.theta[years==y][:,topics].mean(axis=0)) for y in np.unique(years))
+        axes[0,0].set_ylim(0,max(.01,maximum*1.12))
+        axes[-1,0].set_xticks(periods[::max(1,int(np.ceil(len(periods)/7)))])
+        axes[-1,0].set_xlabel(self._get_label('year'))
+        fig.supylabel('平均主题权重' if self.language=='zh' else 'Mean topic weight',fontsize=8)
+        self._save(self.global_dir/self._get_filename('representative_topic_evolution'),dpi=self.dpi);plt.close(fig)
+
     def generate_topic_similarity_evolution(self):
         """Generate topic similarity evolution over time."""
         if self.timestamps is None:
             print("  [SKIP] topic_similarity_evolution (no timestamps)")
             return
-        
+
         years = np.array([t.year for t in self.timestamps])
         unique_years = sorted(set(years))
-        
+
         if len(unique_years) < 2:
             return
-        
+
         year_topic_dists = []
         for year in unique_years:
             mask = years == year
             year_topic_dists.append(self.theta[mask].mean(axis=0))
-        
+
         from scipy.spatial.distance import cosine
         similarities = []
         year_pairs = []
-        
+
         for i in range(len(unique_years) - 1):
             sim = 1 - cosine(year_topic_dists[i], year_topic_dists[i+1])
             similarities.append(sim)
             year_pairs.append(f"{unique_years[i]}-{unique_years[i+1]}")
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
+
+        fig, ax = plt.subplots(figsize=(6.5, 2.8))
         x = range(len(similarities))
-        ax.bar(x, similarities, color='#4472C4', alpha=0.8)
-        ax.plot(x, similarities, 'ro-', markersize=8)
-        
+        ax.plot(x,similarities,'o-',color=COLORS[0],markersize=4)
+        year_pairs=[f'{a}→{str(b)[-2:]}' for a,b in zip(unique_years[:-1],unique_years[1:])]
+
         ax.set_xticks(x)
         ax.set_xticklabels(year_pairs, rotation=45, ha='right')
         ax.set_xlabel(self._get_label('time_period'), fontsize=12)
         ax.set_ylabel(self._get_label('cosine_similarity'), fontsize=12)
         ax.set_ylim(0, 1)
         ax.grid(True, alpha=0.3, axis='y')
-        
+
         plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_similarity_evolution'), dpi=self.dpi,
+        self._save(self.global_dir / self._get_filename('topic_similarity_evolution'), dpi=self.dpi,
                    bbox_inches='tight', facecolor='white')
         plt.close()
         print(f"  ✓ {self._get_filename('topic_similarity_evolution')}")
-    
+
     def generate_all_topics_strength_table(self):
-        """Generate a table showing all topics' strength over time."""
-        if self.timestamps is None:
-            print("  [SKIP] all_topics_strength_table (no timestamps)")
-            return
-        
-        years = np.array([t.year for t in self.timestamps])
-        unique_years = sorted(set(years))
-        
-        table_data = []
-        for topic_idx in range(self.n_topics):
-            topic_col_name = self._get_label('topic')
-            topic_label = f"{self._get_label('topic')}{topic_idx+1}" if self.language == 'zh' else f'T{topic_idx+1}'
-            row = {topic_col_name: topic_label}
-            for year in unique_years:
-                mask = years == year
-                strength = self.theta[mask, topic_idx].mean()
-                row[str(year)] = f"{strength:.4f}"
-            table_data.append(row)
-        
-        df = pd.DataFrame(table_data)
-        
-        fig, ax = plt.subplots(figsize=(max(12, len(unique_years) * 1.5), max(8, self.n_topics * 0.4)))
-        ax.axis('off')
-        
-        table = ax.table(
-            cellText=df.values,
-            colLabels=df.columns,
-            cellLoc='center',
-            loc='center',
-            colColours=['#4472C4'] * len(df.columns)
-        )
-        
-        table.auto_set_font_size(False)
-        table.set_fontsize(8)
-        table.scale(1.0, 1.3)
-        
-        for i in range(len(df.columns)):
-            table[(0, i)].set_text_props(color='white', fontweight='bold')
-        
-        plt.savefig(self.global_dir / self._get_filename('all_topics_strength_table'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('all_topics_strength_table')}")
-    
+        if self.timestamps is None: return
+        from matplotlib.ticker import PercentFormatter
+        years=np.array([t.year for t in self.timestamps]);periods=sorted(set(years))
+        values=np.array([self.theta[years==year].mean(axis=0) for year in periods])
+        frame=pd.DataFrame(values.T,index=[f'T{i+1}' for i in range(self.n_topics)],columns=periods)
+        frame.to_csv(self.global_dir/'topic_weights_by_year.csv',index_label='topic_id')
+        fig,ax=plt.subplots(figsize=(6.5,max(3,len(periods)*.32)))
+        sns.heatmap(values,ax=ax,cmap='Blues',vmin=0,linewidths=.8,linecolor='white',
+                    annot=len(periods)<=20 and self.n_topics<=16,fmt='.1%',annot_kws={'fontsize':8},
+                    xticklabels=frame.index,yticklabels=[f'{y}   (n={(years==y).sum():,})' for y in periods],
+                    cbar_kws={'label':'平均权重' if self.language=='zh' else 'Mean weight','format':PercentFormatter(1)})
+        ax.tick_params(axis='both',rotation=0);ax.set_xlabel(self._get_label('topic'))
+        ax.set_title('年度主题构成' if self.language=='zh' else 'Topic composition by year')
+        self._save(self.global_dir/self._get_filename('all_topics_strength_table'),dpi=self.dpi);plt.close(fig)
+
     def generate_domain_topic_distribution(self):
-        """Generate domain-topic distribution over time."""
-        if self.dimension_values is None or self.timestamps is None:
-            print("  [SKIP] domain_topic_distribution (no dimension_values or timestamps)")
-            return
-        
+        if self.dimension_values is None or self.timestamps is None: return
+        from matplotlib.ticker import MaxNLocator, PercentFormatter
+        from textwrap import fill
         years = np.array([t.year for t in self.timestamps])
-        unique_years = sorted(set(years))
-        unique_dims = sorted(set(self.dimension_values))
-        
-        if len(unique_years) < 2 or len(unique_dims) < 2:
-            return
-        
-        topic_strengths = self.theta.mean(axis=0)
-        top_topics = np.argsort(topic_strengths)[-3:][::-1]
-        
-        n_dims = min(4, len(unique_dims))
-        fig, axes = plt.subplots(1, n_dims, figsize=(5 * n_dims, 5), sharey=True)
-        if n_dims == 1:
-            axes = [axes]
-        
-        colors = ['#4472C4', '#ED7D31', '#70AD47']
-        
-        for d_idx, dim in enumerate(unique_dims[:n_dims]):
-            ax = axes[d_idx]
-            dim_mask = np.array(self.dimension_values) == dim
-            
-            for t_idx, topic_idx in enumerate(top_topics):
-                props = []
+        unique_years = np.arange(years.min(), years.max()+1)
+        dimensions = pd.Series(self.dimension_values).value_counts().head(4).index
+        topics = np.argsort(-self.theta.mean(axis=0))[:3]
+        fig, axes = plt.subplots(2, 2, figsize=(9, 6), sharex=True, sharey=True)
+        rows = []
+        for ax, dimension in zip(axes.flat, dimensions):
+            for j,topic in enumerate(topics):
+                values = []
                 for year in unique_years:
-                    year_mask = years == year
-                    combined_mask = dim_mask & year_mask
-                    if combined_mask.sum() > 0:
-                        props.append(self.theta[combined_mask, topic_idx].mean())
-                    else:
-                        props.append(0)
-                
-                ax.plot(unique_years, props, 'o-', color=colors[t_idx], 
-                       linewidth=2, markersize=6, label=f"T{topic_idx+1}")
-            
-            ax.set_xlabel(self._get_label('year'), fontsize=10)
-            if d_idx == 0:
-                ax.set_ylabel(self._get_label('proportion'), fontsize=10)
-            ax.legend(loc='best', fontsize=8)
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('domain_topic_distribution'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('domain_topic_distribution')}")
-    
+                    mask = (years == year) & (self.dimension_values == dimension)
+                    value = self.theta[mask, topic].mean() if mask.any() else np.nan
+                    values.append(value)
+                    rows.append([dimension, int(year), int(topic)+1, int(mask.sum()), value])
+                ax.plot(unique_years, values, marker=['o','s','^'][j],linestyle='-', color=COLORS[topic % len(COLORS)], label=f'T{topic+1}', markersize=3)
+            ax.set_title(fill(str(dimension), 22)+f' · n={(self.dimension_values==dimension).sum():,}')
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
+            ax.yaxis.set_major_formatter(PercentFormatter(1))
+            ax.grid(axis='y', alpha=.5)
+            ax.set_xlabel(self._get_label('year')); ax.set_ylabel(self._get_label('proportion'))
+        for ax in list(axes.flat)[len(dimensions):]: ax.set_visible(False)
+        axes[0,0].legend(loc='best', frameon=False)
+        pd.DataFrame(rows,columns=['group','year','topic_id','n_documents','mean_weight']).to_csv(self.global_dir/'group_topic_over_time.csv',index=False)
+        fig.tight_layout()
+        self._save(self.global_dir / self._get_filename('domain_topic_distribution'),dpi=self.dpi)
+        plt.close(fig)
+
+
     def generate_doc_volume(self):
-        """Generate document volume over time chart."""
-        if self.timestamps is None:
-            print(f"  ⚠ doc_volume skipped (no timestamps)")
-            return
-        
-        years = [t.year for t in self.timestamps]
-        year_counts = pd.Series(years).value_counts().sort_index()
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        ax.bar(year_counts.index, year_counts.values, color='steelblue', alpha=0.8)
-        ax.plot(year_counts.index, year_counts.values, 'ro-', markersize=6)
-        
-        ax.set_xlabel(self._get_label('year'), fontsize=12)
-        ax.set_ylabel(self._get_label('document_count'), fontsize=12)
-        
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('doc_volume'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('doc_volume')}")
-    
+        if self.timestamps is None: return
+        counts=pd.Series([t.year for t in self.timestamps]).value_counts().sort_index()
+        fig,ax=plt.subplots(figsize=(5.8,max(3,len(counts)*.29)))
+        ax.barh(range(len(counts)),counts.values,color=COLORS[0],height=.55)
+        ax.set_yticks(range(len(counts)),counts.index);ax.invert_yaxis()
+        for i,value in enumerate(counts): ax.text(1.01,i,f'{value:,}',transform=ax.get_yaxis_transform(),va='center')
+        ax.set_xlim(0,max(counts)*1.05);ax.spines['left'].set_visible(False);ax.tick_params(axis='y',length=0)
+        ax.set_xlabel(self._get_label('document_count'))
+        ax.set_title('年度样本量（按现有数据）' if self.language=='zh' else 'Annual sample coverage (observed data)')
+        counts.rename_axis('year').to_csv(self.global_dir/'document_counts_by_year.csv',header=['n_documents'])
+        self._save(self.global_dir/self._get_filename('doc_volume'),dpi=self.dpi);plt.close(fig)
+
     def generate_kl_divergence(self):
-        """Generate KL divergence temporal chart."""
-        if self.timestamps is None:
-            print(f"  ⚠ kl_divergence skipped (no timestamps)")
+        """Adjacent-time KL from actual aligned topic-word probabilities."""
+        evidence=self._temporal_beta()
+        if evidence is None:
+            print('[SKIP] kl_divergence: no aligned time-specific beta')
             return
-        
-        years = np.array([t.year for t in self.timestamps])
-        unique_years = sorted(set(years))
-        
-        if len(unique_years) < 2:
-            print(f"  ⚠ kl_divergence skipped (not enough time periods)")
-            return
-        
-        kl_distances = []
-        year_pairs = []
-        
-        beta_normalized = self.beta / self.beta.sum(axis=1, keepdims=True)
-        
-        for i in range(len(unique_years) - 1):
-            year1, year2 = unique_years[i], unique_years[i+1]
-            
-            kl_sum = 0
-            for topic_idx in range(self.n_topics):
-                p = beta_normalized[topic_idx] + 1e-10
-                noise = np.random.normal(0, 0.01, p.shape)
-                q = np.clip(p + noise * (i + 1) * 0.1, 1e-10, 1)
-                q = q / q.sum()
-                kl_sum += entropy(p, q)
-            
-            kl_distances.append(kl_sum / self.n_topics)
-            year_pairs.append(f"{year1}-{year2}")
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        x = range(len(kl_distances))
-        ax.plot(x, kl_distances, 'b-o', linewidth=2, markersize=8)
-        ax.fill_between(x, kl_distances, alpha=0.3)
-        
-        ax.set_xticks(x)
-        ax.set_xticklabels(year_pairs, rotation=45, ha='right')
-        
-        ax.set_xlabel(self._get_label('time_period'), fontsize=12)
-        ax.set_ylabel(self._get_label('kl_divergence'), fontsize=12)
-        
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('kl_divergence'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('kl_divergence')}")
-    
+        beta,times=evidence
+        # Relative entropy is undefined when q=0 but p>0; report this rather than hiding infinity.
+        from scipy.special import rel_entr
+        values=rel_entr(beta[1:],beta[:-1]).sum(axis=2)
+        if not np.isfinite(values).all():raise ValueError('KL is infinite for zero-support transitions; inspect beta')
+        labels=[f'{a}→{b}' for a,b in zip(times[:-1],times[1:])]
+        fig,ax=plt.subplots(figsize=(7.15,max(3,len(labels)*.3)),layout='constrained')
+        sns.heatmap(values,ax=ax,cmap='Blues',vmin=0,linewidths=.5,linecolor='white',
+                    xticklabels=[f'T{i+1}' for i in range(self.n_topics)],yticklabels=labels,
+                    cbar_kws={'label':'KL (nats)'})
+        ax.tick_params(axis='both',rotation=0)
+        ax.set_title('相邻时间片主题词分布变化' if self.language=='zh' else 'Adjacent-time topic-word divergence')
+        ax.set_xlabel('KL(beta[t] || beta[t-1]) · '+('相同主题的完整词表' if self.language=='zh' else 'full vocabulary, same topic'))
+        pd.DataFrame(values,index=labels,columns=[f'T{i+1}' for i in range(self.n_topics)]).to_csv(self.global_dir/'temporal_topic_kl.csv',index_label='transition')
+        self._save(self.global_dir/self._get_filename('kl_divergence'),dpi=self.dpi);plt.close(fig)
+
     def generate_dimension_heatmap(self):
-        """Generate dimension-topic heatmap."""
-        if self.dimension_values is None:
-            print(f"  ⚠ dim_heatmap skipped (no dimension_values)")
-            return
-        
-        unique_dims = sorted(set(self.dimension_values))
-        
-        heatmap_data = np.zeros((len(unique_dims), self.n_topics))
-        for i, dim in enumerate(unique_dims):
-            mask = self.dimension_values == dim
-            heatmap_data[i] = self.theta[mask].mean(axis=0)
-        
-        fig, ax = plt.subplots(figsize=(14, 8))
-        
-        im = ax.imshow(heatmap_data.T, cmap='YlOrRd', aspect='auto')
-        
-        ax.set_xticks(range(len(unique_dims)))
-        ax.set_yticks(range(self.n_topics))
-        ax.set_xticklabels(unique_dims, rotation=45, ha='right', fontsize=9)
-        ax.set_yticklabels([f"{self._get_label('topic')} {i+1}" for i in range(self.n_topics)], fontsize=9)
-        
-        ax.set_xlabel(self._get_label('dimension'), fontsize=12)
-        ax.set_ylabel(self._get_label('topic'), fontsize=12)
-        
-        plt.colorbar(im, ax=ax, label=self._get_label('proportion'))
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('dim_heatmap'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('dim_heatmap')}")
-    
-    # ========== PER-TOPIC CHARTS ==========
-    
+        if self.dimension_values is None: return
+        from textwrap import fill
+        from matplotlib.ticker import PercentFormatter
+        groups=pd.Series(self.dimension_values).value_counts().index
+        values=np.array([self.theta[self.dimension_values==g].mean(axis=0) for g in groups])
+        fig,ax=plt.subplots(figsize=(7,max(3,len(groups)*.45)))
+        sns.heatmap(values,ax=ax,cmap='Blues',vmin=0,linewidths=.8,linecolor='white',
+                    annot=len(groups)<=16 and self.n_topics<=16,fmt='.1%',annot_kws={'fontsize':8},
+                    xticklabels=[f'T{i+1}' for i in range(self.n_topics)],
+                    yticklabels=[fill(str(g),18)+f' (n={(self.dimension_values==g).sum():,})' for g in groups],
+                    cbar_kws={'label':'平均权重' if self.language=='zh' else 'Mean weight','format':PercentFormatter(1)})
+        ax.tick_params(axis='both',rotation=0);ax.set_xlabel(self._get_label('topic'))
+        ax.set_title('来源与主题构成' if self.language=='zh' else 'Topic composition by source')
+        pd.DataFrame(values,index=groups,columns=[f'T{i+1}' for i in range(self.n_topics)]).to_csv(self.global_dir/'topic_weights_by_group.csv',index_label='group')
+        self._save(self.global_dir/self._get_filename('dim_heatmap'),dpi=self.dpi);plt.close(fig)
+
     def generate_topic_word_importance(self, topic_idx):
         """Generate word importance bar chart for a single topic."""
         topic_dir = self.topics_dir / f'topic_{topic_idx + 1}'
-        
+
         if topic_idx < len(self.topic_words):
             words_weights = self.topic_words[topic_idx][1][:15]
         else:
             top_indices = np.argsort(self.beta[topic_idx])[-15:][::-1]
-            words_weights = [(self.vocab[i] if i < len(self.vocab) else f'word_{i}', 
+            words_weights = [(self.vocab[i] if i < len(self.vocab) else f'word_{i}',
                              self.beta[topic_idx, i]) for i in top_indices]
-        
+
         words = [w[0] for w in words_weights]
         weights = [w[1] for w in words_weights]
-        
+
         fig, ax = plt.subplots(figsize=(10, 8))
-        
+
         y_pos = range(len(words))
-        ax.barh(y_pos, weights, color='steelblue', alpha=0.8)
-        
+        ax.barh(y_pos, weights, color=COLORS[0], alpha=1)
+
         ax.set_yticks(y_pos)
         ax.set_yticklabels(words, fontsize=10)
         ax.invert_yaxis()
-        
+
         ax.set_xlabel(self._get_label('weight'), fontsize=12)
-        
+
         ax.grid(True, axis='x', alpha=0.3)
-        
+
         plt.tight_layout()
-        plt.savefig(topic_dir / self._get_filename('word_importance'), dpi=self.dpi, 
+        self._save(topic_dir / self._get_filename('word_importance'), dpi=self.dpi,
                    bbox_inches='tight', facecolor='white')
         plt.close()
-    
+
     def generate_topic_evolution(self, topic_idx):
-        """Generate topic evolution chart for a single topic with smoothed curve."""
-        if self.timestamps is None:
-            return
-        
-        topic_dir = self.topics_dir / f'topic_{topic_idx + 1}'
-        
-        years = np.array([t.year for t in self.timestamps])
-        unique_years = sorted(set(years))
-        
-        proportions = []
-        for year in unique_years:
-            mask = years == year
-            proportions.append(self.theta[mask, topic_idx].mean())
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        # Plot original data points
-        ax.scatter(unique_years, proportions, color='#4472C4', s=60, zorder=5, 
-                  label='Data Points' if self.language == 'en' else '数据点')
-        
-        # Add smoothed curve using spline interpolation
-        if len(unique_years) >= 4:
-            from scipy.interpolate import make_interp_spline
-            try:
-                x_arr = np.array(unique_years)
-                y_arr = np.array(proportions)
-                x_smooth = np.linspace(x_arr.min(), x_arr.max(), 300)
-                spl = make_interp_spline(x_arr, y_arr, k=3)
-                y_smooth = spl(x_smooth)
-                ax.plot(x_smooth, y_smooth, color='#4472C4', linewidth=2.5, 
-                       label='Smoothed Trend' if self.language == 'en' else '平滑趋势')
-                ax.fill_between(x_smooth, y_smooth, alpha=0.2, color='#4472C4')
-            except Exception:
-                # Fallback to simple line if spline fails
-                ax.plot(unique_years, proportions, 'b-', linewidth=2)
-                ax.fill_between(unique_years, proportions, alpha=0.3)
-        else:
-            ax.plot(unique_years, proportions, 'b-o', linewidth=2, markersize=8)
-            ax.fill_between(unique_years, proportions, alpha=0.3)
-        
-        ax.set_xlabel(self._get_label('year'), fontsize=12)
-        ax.set_ylabel(self._get_label('proportion'), fontsize=12)
-        
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(topic_dir / self._get_filename('topic_evolution'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-    
+        if self.timestamps is None: return
+        from matplotlib.ticker import PercentFormatter
+        years=np.array([t.year for t in self.timestamps]);periods=np.arange(years.min(),years.max()+1)
+        counts=np.array([(years==y).sum() for y in periods])
+        values=[self.theta[years==y,topic_idx].mean() if (years==y).any() else np.nan for y in periods]
+        fig,(ax,sample)=plt.subplots(2,1,figsize=(6.3,3.7),height_ratios=[3,1],sharex=True,layout='constrained')
+        fig._theta_no_panel_labels=True
+        color=COLORS[topic_idx%len(COLORS)]
+        ax.plot(periods,values,'o-',color=color,markersize=4,lw=1.5)
+        ax.set_ylim(bottom=0);ax.yaxis.set_major_formatter(PercentFormatter(1))
+        ax.set_ylabel('平均主题权重' if self.language=='zh' else 'Mean topic weight')
+        ax.set_title(f'T{topic_idx+1}  '+ ' · '.join(w for w,_ in self.topic_words[topic_idx][1][:2]))
+        ax.annotate(f'{values[-1]:.1%}',(periods[-1],values[-1]),xytext=(6,0),textcoords='offset points',va='center',color=color)
+        ax.margins(x=.07)
+        sample.bar(periods,counts,width=.55,color='#CDD9E0')
+        sample.set_ylim(0,max(counts)*1.6);sample.set_yticks([]);sample.set_ylabel('样本 n' if self.language=='zh' else 'Sample n')
+        for year,count in zip(periods,counts):sample.text(year,count,f'{count:,}',ha='center',va='bottom',fontsize=7)
+        sample.set_xticks(periods[::max(1,int(np.ceil(len(periods)/7)))])
+        sample.set_xlabel(self._get_label('year'))
+        self._save(self.topics_dir/f'topic_{topic_idx+1}'/self._get_filename('topic_evolution'),dpi=self.dpi);plt.close(fig)
+
     def generate_topic_word_dist_change(self, topic_idx):
-        """Generate word distribution change table for a single topic."""
-        if self.timestamps is None:
+        """Same words at each actual time slice; no synthetic perturbations."""
+        evidence=self._temporal_beta()
+        if evidence is None:
+            print('[SKIP] word_distribution_change: no aligned time-specific beta')
             return
-        
-        topic_dir = self.topics_dir / f'topic_{topic_idx + 1}'
-        
-        years = sorted(set([t.year for t in self.timestamps]))[:5]
-        
-        if topic_idx < len(self.topic_words):
-            top_words = [w[0] for w in self.topic_words[topic_idx][1][:10]]
-            top_indices = [self.vocab.index(w) if w in self.vocab else i 
-                          for i, w in enumerate(top_words)]
-        else:
-            top_indices = np.argsort(self.beta[topic_idx])[-10:][::-1]
-            top_words = [self.vocab[i] if i < len(self.vocab) else f'word_{i}' 
-                        for i in top_indices]
-        
-        table_data = []
-        for i, (word, word_idx) in enumerate(zip(top_words, top_indices)):
-            row = {self._get_label('word'): word}
-            base_weight = self.beta[topic_idx, word_idx] if word_idx < self.n_vocab else 0.01
-            for j, year in enumerate(years):
-                weight = base_weight * (1 + np.random.normal(0, 0.05) * (j + 1) * 0.1)
-                row[str(year)] = f"{weight:.4f}"
-            table_data.append(row)
-        
-        df = pd.DataFrame(table_data)
-        
-        fig, ax = plt.subplots(figsize=(12, max(6, len(table_data) * 0.5)))
-        ax.axis('off')
-        
-        table = ax.table(
-            cellText=df.values,
-            colLabels=df.columns,
-            cellLoc='center',
-            loc='center',
-            colColours=['#4472C4'] * len(df.columns)
-        )
-        
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1.2, 1.5)
-        
-        for i in range(len(df.columns)):
-            table[(0, i)].set_text_props(color='white', fontweight='bold')
-        
-        plt.savefig(topic_dir / self._get_filename('word_distribution_change'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-    
+        beta,times=evidence
+        selected=np.argsort(-beta[:,topic_idx,:].mean(axis=0))[:8]
+        frame=pd.DataFrame(beta[:,topic_idx,selected].T,index=[self.vocab[i] for i in selected],columns=times)
+        fig,ax=plt.subplots(figsize=(7.15,3.4),layout='constrained')
+        sns.heatmap(frame,ax=ax,cmap='Blues',vmin=0,linewidths=.5,linecolor='white',
+                    cbar_kws={'label':'词概率' if self.language=='zh' else 'Word probability'})
+        ax.tick_params(axis='y',rotation=0);ax.tick_params(axis='x',rotation=45)
+        ax.set_title(f'T{topic_idx+1} · '+('分时词概率' if self.language=='zh' else 'Time-specific word probabilities'))
+        ax.set_ylabel('');ax.set_xlabel('全时段均值最高的 8 个词；同一色阶' if self.language=='zh' else 'Top 8 words by time-mean probability; one color scale')
+        directory=self.topics_dir/f'topic_{topic_idx+1}';directory.mkdir(exist_ok=True)
+        frame.to_csv(directory/'word_distribution_by_time.csv',index_label='word')
+        self._save(directory/'word_distribution_by_time.png',dpi=self.dpi);plt.close(fig)
+
+    def _temporal_beta(self):
+        times=self.time_slices_info.get('unique_times',[])
+        if self.beta_over_time is None or len(times)<2:return None
+        beta=np.asarray(self.beta_over_time,dtype=float)
+        if beta.shape!=(len(times),self.n_topics,self.n_vocab) or not np.isfinite(beta).all() or (beta<0).any():
+            raise ValueError('Time-specific beta must align to time/topic/vocabulary axes and be finite/nonnegative')
+        mass=beta.sum(axis=2,keepdims=True)
+        if (mass<=0).any():raise ValueError('Time-specific beta contains an empty topic')
+        return beta/mass,list(times)
+
     def generate_topic_word_sense(self, topic_idx):
-        """Generate word sense evolution chart for a single topic."""
-        if self.timestamps is None:
-            return
-        
-        topic_dir = self.topics_dir / f'topic_{topic_idx + 1}'
-        
-        years = sorted(set([t.year for t in self.timestamps]))
-        
-        if topic_idx < len(self.topic_words):
-            top_words = [w[0] for w in self.topic_words[topic_idx][1][:5]]
-        else:
-            top_indices = np.argsort(self.beta[topic_idx])[-5:][::-1]
-            top_words = [self.vocab[i] if i < len(self.vocab) else f'word_{i}' 
-                        for i in top_indices]
-        
-        np.random.seed(42 + topic_idx)
-        word_proportions = {}
-        for word in top_words:
-            base = np.random.uniform(0.1, 0.3)
-            props = [base * (1 + np.random.normal(0, 0.1) * (i + 1) * 0.05) 
-                    for i in range(len(years))]
-            word_proportions[word] = props
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        colors = plt.cm.Set2(np.linspace(0, 1, len(top_words)))
-        
-        for i, word in enumerate(top_words):
-            ax.plot(years, word_proportions[word], '-o', color=colors[i], 
-                   linewidth=2, markersize=6, label=word)
-        
-        ax.set_xlabel(self._get_label('year'), fontsize=12)
-        ax.set_ylabel(self._get_label('weight'), fontsize=12)
-        
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(topic_dir / self._get_filename('word_sense_evolution'), dpi=self.dpi, 
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-    
-    # ========== NEW GLOBAL CHARTS ==========
-    
+        """Do not present synthetic trajectories as fitted model results."""
+        print("  [SKIP] word_sense_evolution: no observed semantic trajectories; simulated values are not evidence")
+
     def generate_training_convergence(self):
         """Generate training convergence curves (split into separate figures)."""
         if self.training_history is None:
             print("  [SKIP] training_convergence (no training_history)")
             return
-        
-        epochs = range(1, len(self.training_history.get('train_loss', [])) + 1)
-        
-        # Figure 1: Training and Validation Loss
-        if 'train_loss' in self.training_history or 'val_loss' in self.training_history:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            if 'train_loss' in self.training_history:
-                ax.plot(epochs, self.training_history['train_loss'], 'b-', label=self._get_label('train_loss'), linewidth=2)
-            if 'val_loss' in self.training_history:
-                ax.plot(epochs, self.training_history['val_loss'], 'r-', label=self._get_label('val_loss'), linewidth=2)
-            ax.set_xlabel(self._get_label('epoch'))
-            ax.set_ylabel(self._get_label('loss'))
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(self.global_dir / self._get_filename('training_loss'), dpi=self.dpi,
-                       bbox_inches='tight', facecolor='white')
-            plt.close()
-            print(f"  ✓ {self._get_filename('training_loss')}")
-        
-        # Figure 2: Reconstruction Loss and KL Loss
-        if 'recon_loss' in self.training_history or 'kl_loss' in self.training_history:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            if 'recon_loss' in self.training_history:
-                ax.plot(epochs, self.training_history['recon_loss'], 'g-', label=self._get_label('recon_loss'), linewidth=2)
-            if 'kl_loss' in self.training_history:
-                ax.plot(epochs, self.training_history['kl_loss'], 'm-', label=self._get_label('kl_loss'), linewidth=2)
-            ax.set_xlabel(self._get_label('epoch'))
-            ax.set_ylabel(self._get_label('loss'))
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(self.global_dir / self._get_filename('training_recon_kl'), dpi=self.dpi,
-                       bbox_inches='tight', facecolor='white')
-            plt.close()
-            print(f"  ✓ {self._get_filename('training_recon_kl')}")
-        
-        # Figure 3: Perplexity
-        if 'perplexity' in self.training_history:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.plot(epochs, self.training_history['perplexity'], 'c-', linewidth=2)
-            ax.set_xlabel(self._get_label('epoch'))
-            ax.set_ylabel(self._get_label('perplexity'))
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(self.global_dir / self._get_filename('training_perplexity'), dpi=self.dpi,
-                       bbox_inches='tight', facecolor='white')
-            plt.close()
-            print(f"  ✓ {self._get_filename('training_perplexity')}")
-        
-        # Remove training summary figure as requested
-        # # Figure 4: Training Summary
-        # summary_text = []
-        # if 'best_val_loss' in self.training_history:
-        #     summary_text.append(f"Best Val Loss: {self.training_history['best_val_loss']:.4f}")
-        # if 'test_loss' in self.training_history:
-        #     summary_text.append(f"Test Loss: {self.training_history['test_loss']:.4f}")
-        # if 'epochs_trained' in self.training_history:
-        #     summary_text.append(f"Epochs Trained: {self.training_history['epochs_trained']}")
-        # if 'perplexity' in self.training_history:
-        #     summary_text.append(f"Final Perplexity: {self.training_history['perplexity'][-1]:.2f}")
-        # 
-        # if summary_text:
-        #     fig, ax = plt.subplots(figsize=(8, 5))
-        #     ax.axis('off')
-        #     ax.text(0.5, 0.5, '\n'.join(summary_text), transform=ax.transAxes,
-        #             fontsize=16, verticalalignment='center', horizontalalignment='center',
-        #             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-        #     plt.tight_layout()
-        #     plt.savefig(self.global_dir / self._get_filename('training_summary'), dpi=self.dpi,
-        #                bbox_inches='tight', facecolor='white')
-        #     plt.close()
-        #     print(f"  ✓ {self._get_filename('training_summary')}")
-    
+
+        # Keep the two native loss histories separate: they optimize different objectives.
+        stages = [key for key in ('stage1', 'stage2') if isinstance(self.training_history.get(key), dict)]
+        if stages:
+            original_history, original_dir = self.training_history, self.global_dir
+            try:
+                for stage in stages:
+                    self.training_history = original_history[stage]
+                    self.global_dir = original_dir / stage
+                    self.global_dir.mkdir(parents=True, exist_ok=True)
+                    self.generate_training_convergence()
+            finally:
+                self.training_history, self.global_dir = original_history, original_dir
+            return
+
+        from matplotlib.ticker import MaxNLocator
+        series={k:np.asarray(v,dtype=float) for k,v in self.training_history.items()
+                if k in {'train_loss','val_loss','recon_loss','kl_loss','perplexity','train_ppl','val_ppl'} and len(v)}
+        if not series or any(not np.isfinite(v).all() for v in series.values()):
+            raise ValueError('Training curves require saved finite, nonempty histories')
+        pd.DataFrame({k:pd.Series(v,index=np.arange(1,len(v)+1)) for k,v in series.items()}).to_csv(
+            self.global_dir/'training_curves.csv',index_label='epoch')
+        for keys,filename in [(['train_loss','val_loss'],'training_loss'),
+                              (['recon_loss','kl_loss'],'training_recon_kl'),
+                              (['perplexity','train_ppl','val_ppl'],'training_perplexity')]:
+            keys=[k for k in keys if k in series]
+            if not keys:continue
+            split=filename=='training_recon_kl'
+            fig,axes=plt.subplots(1,len(keys) if split else 1,figsize=(7.1,3) if split else (6.2,3.2),
+                                  squeeze=False,layout='constrained')
+            for i,key in enumerate(keys):
+                ax=axes.flat[i] if split else axes.flat[0]
+                values=series[key]
+                label=self._get_label({'train_ppl':'train_perplexity','val_ppl':'val_perplexity'}.get(key,key))
+                ax.plot(range(1,len(values)+1),values,marker=['o','s','^'][i],linestyle='-' if i==0 else '--',
+                        color=COLORS[i],markersize=3,lw=1.2,label=label)
+                ax.set_xlabel(self._get_label('epoch'));ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+                if split:ax.set_title(label);ax.set_ylabel(self._get_label('loss'))
+            if not split:
+                ax=axes.flat[0]
+                ylabel=self._get_label('perplexity' if filename=='training_perplexity' else 'loss')
+                combined=np.concatenate([series[k] for k in keys])
+                if filename=='training_perplexity' and (combined>0).all() and combined.max()/combined.min()>100:
+                    ax.set_yscale('log');ylabel+=('（对数坐标）' if self.language=='zh' else ' (log scale)')
+                ax.set_ylabel(ylabel)
+                fig.legend(*ax.get_legend_handles_labels(),loc='outside lower center',ncol=len(keys))
+            self._save(self.global_dir/self._get_filename(filename),dpi=self.dpi);plt.close(fig)
+
     def generate_vocab_evolution(self):
-        """Generate vocabulary evolution chart (top words frequency over time)."""
-        if self.timestamps is None or self.bow_matrix is None:
-            print("  [SKIP] vocab_evolution (no timestamps or bow_matrix)")
-            return
-        
-        from scipy import sparse
-        
-        # Convert timestamps to years
-        years = sorted(set([t.year for t in self.timestamps]))
-        if len(years) < 2:
-            print("  [SKIP] vocab_evolution (need at least 2 years)")
-            return
-        
-        # Get top words by total frequency
-        if sparse.issparse(self.bow_matrix):
-            word_freq = np.array(self.bow_matrix.sum(axis=0)).flatten()
-        else:
-            word_freq = np.sum(self.bow_matrix, axis=0)
-        
-        top_word_indices = np.argsort(word_freq)[-10:][::-1]
-        top_words = [self.vocab[i] if i < len(self.vocab) else f'word_{i}' 
-                    for i in top_word_indices]
-        
-        # Calculate word frequency per year
-        year_word_freq = {year: np.zeros(len(top_word_indices)) for year in years}
-        
-        for doc_idx, ts in enumerate(self.timestamps):
-            year = ts.year
-            if year in year_word_freq:
-                if sparse.issparse(self.bow_matrix):
-                    doc_bow = self.bow_matrix[doc_idx].toarray().flatten()
-                else:
-                    doc_bow = self.bow_matrix[doc_idx]
-                for i, word_idx in enumerate(top_word_indices):
-                    year_word_freq[year][i] += doc_bow[word_idx]
-        
-        # Plot
-        fig, ax = plt.subplots(figsize=(14, 8))
-        
-        colors = plt.cm.tab10(np.linspace(0, 1, len(top_words)))
-        
-        for i, word in enumerate(top_words):
-            freqs = [year_word_freq[year][i] for year in years]
-            ax.plot(years, freqs, '-o', color=colors[i], linewidth=2, 
-                   markersize=6, label=word)
-        
-        ax.set_xlabel(self._get_label('year'))
-        ax.set_ylabel(self._get_label('word_frequency'))
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('vocab_evolution'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('vocab_evolution')}")
-    
+        if self.timestamps is None or self.bow_matrix is None:return
+        from matplotlib.ticker import MaxNLocator
+        years=np.array([t.year for t in self.timestamps]);periods=np.arange(years.min(),years.max()+1)
+        if len(periods)<2:return
+        totals=np.asarray(self.bow_matrix.sum(axis=0)).ravel();ids=np.argsort(totals)[-10:][::-1]
+        words=[self.vocab[i] for i in ids]
+        values=np.array([np.asarray(self.bow_matrix[years==y][:,ids].sum(axis=0)).ravel() if (years==y).any() else np.full(len(ids),np.nan) for y in periods])
+        fig,axes=plt.subplots(int(np.ceil(len(ids)/2)),2,figsize=(7,6.5),sharex=True,sharey=True,layout='constrained',squeeze=False)
+        fig._theta_no_panel_labels=True
+        for i,(ax,word) in enumerate(zip(axes.flat,words)):
+            ax.plot(periods,values[:,i],'o-',color=COLORS[0],markersize=2.5)
+            ax.set_title(word,fontsize=9);ax.set_ylim(bottom=0)
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True,nbins=4));ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+        axes[0,0].set_ylim(0,max(1,float(np.nanmax(values))*1.12))
+        for ax in list(axes.flat)[len(ids):]:ax.set_visible(False)
+        fig.supylabel('原始词频（未按样本量归一化）' if self.language=='zh' else 'Raw word counts (not sample-normalized)',fontsize=8)
+        fig.supxlabel(self._get_label('year'),fontsize=8)
+        pd.DataFrame(values,index=periods,columns=words).to_csv(self.global_dir/'word_counts_by_year.csv',index_label='year')
+        self._save(self.global_dir/self._get_filename('vocab_evolution'),dpi=self.dpi);plt.close(fig)
+
     def generate_topic_coherence_chart(self):
-        """Generate topic coherence chart from metrics."""
-        if self.metrics is None:
-            print("  [SKIP] topic_coherence_chart (no metrics)")
-            return
-        
-        # Check for coherence data
-        coherence_keys = ['topic_coherence_npmi_per_topic', 'topic_coherence_cv_per_topic', 
-                         'topic_coherence_umass_per_topic']
-        available_coherence = {k: self.metrics[k] for k in coherence_keys if k in self.metrics}
-        
-        if not available_coherence:
-            print("  [SKIP] topic_coherence_chart (no coherence data)")
-            return
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        x = np.arange(self.n_topics)
-        width = 0.25
-        
-        colors = {'topic_coherence_npmi_per_topic': 'steelblue',
-                 'topic_coherence_cv_per_topic': 'coral',
-                 'topic_coherence_umass_per_topic': 'seagreen'}
-        if self.language == 'zh':
-            labels = {'topic_coherence_npmi_per_topic': '一致性(NPMI)',
-                     'topic_coherence_cv_per_topic': '一致性(C_V)',
-                     'topic_coherence_umass_per_topic': '一致性(UMass)'}
-        else:
-            labels = {'topic_coherence_npmi_per_topic': 'NPMI',
-                     'topic_coherence_cv_per_topic': 'C_V',
-                     'topic_coherence_umass_per_topic': 'UMass'}
-        
-        offset = 0
-        for key, values in available_coherence.items():
-            ax.bar(x + offset * width, values, width, label=labels[key], color=colors[key])
-            offset += 1
-        
-        ax.set_xlabel(self._get_label('topic'))
-        ax.set_ylabel(self._get_label('coherence_score'))
-        ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_coherence'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_coherence')}")
-    
+        """Aligned topic rows, independent metric axes, unmodified observations."""
+        keys=[('topic_coherence_npmi_per_topic','NPMI'),('topic_coherence_cv_per_topic','C_V'),('topic_coherence_umass_per_topic','UMass')]
+        available=[(key,name) for key,name in keys if (self.metrics or {}).get(key) is not None]
+        if not available:return
+        fig,axes=plt.subplots(1,len(available),figsize=(max(3,len(available)*2.3),max(2.6,self.n_topics*.3)),sharey=True,squeeze=False,layout='constrained')
+        records=[];y=np.arange(self.n_topics)
+        for ax,(key,name) in zip(axes[0],available):
+            values=np.asarray(self.metrics[key],dtype=float)
+            if values.shape!=(self.n_topics,):
+                plt.close(fig);raise ValueError(f'{name} must contain one value per topic')
+            ax.barh(y,values,color=[COLORS[i%len(COLORS)] for i in y],height=.45)
+            ax.set_title(name);ax.axvline(0,color='#9BA3A8',lw=.6)
+            ax.set_yticks(y,[f'T{i+1}' for i in y]);ax.invert_yaxis() if not ax.yaxis_inverted() else None
+            ax.spines['left'].set_visible(False);ax.tick_params(axis='y',length=0);ax.locator_params(axis='x',nbins=4)
+            records.extend({'topic':i+1,'metric':name,'value':v} for i,v in enumerate(values))
+        self._save(self.global_dir/self._get_filename('topic_coherence'),dpi=self.dpi);plt.close(fig)
+        pd.DataFrame(records).to_csv(self.global_dir/'topic_coherence.csv',index=False)
+
     def generate_topic_diversity_chart(self):
-        """Generate topic diversity charts from metrics (split into separate figures)."""
-        if self.metrics is None:
-            print("  [SKIP] topic_diversity_chart (no metrics)")
-            return
-        
-        # Figure 1: Overall Topic Quality Metrics
-        metric_names = []
-        metric_values = []
-        
-        if 'topic_diversity_td' in self.metrics:
-            metric_names.append('TD')
-            metric_values.append(self.metrics['topic_diversity_td'])
-        if 'topic_diversity_irbo' in self.metrics:
-            metric_names.append('iRBO')
-            metric_values.append(self.metrics['topic_diversity_irbo'])
-        if 'topic_coherence_npmi_avg' in self.metrics:
-            metric_names.append('NPMI')
-            metric_values.append(self.metrics['topic_coherence_npmi_avg'])
-        if 'topic_exclusivity_avg' in self.metrics:
-            metric_names.append('Exclusivity')
-            metric_values.append(self.metrics['topic_exclusivity_avg'])
-        
-        # Per-topic exclusivity
-        if 'topic_exclusivity_per_topic' in self.metrics:
-            exclusivity = self.metrics['topic_exclusivity_per_topic']
-            fig, ax = plt.subplots(figsize=(12, 6))
-            x = np.arange(len(exclusivity))
-            ax.bar(x, exclusivity, color='steelblue')
-            ax.set_xlabel(self._get_label('topic'))
-            ax.set_ylabel(self._get_label('exclusivity'))
-            ax.axhline(y=np.mean(exclusivity), color='red', linestyle='--', label=self._get_label('mean'))
-            ax.legend()
-            ax.grid(True, alpha=0.3, axis='y')
-            plt.tight_layout()
-            plt.savefig(self.global_dir / self._get_filename('topic_exclusivity'), dpi=self.dpi,
-                       bbox_inches='tight', facecolor='white')
-            plt.close()
-            print(f"  ✓ {self._get_filename('topic_exclusivity')}")
-    
+        if not self.metrics or 'topic_exclusivity_per_topic' not in self.metrics:return
+        values=np.asarray(self.metrics['topic_exclusivity_per_topic']);y=np.arange(len(values))
+        fig,ax=plt.subplots(figsize=(5.2,max(2.5,len(values)*.29)))
+        ax.hlines(y,0,values,color='#D9E0E5',lw=1.5)
+        ax.scatter(values,y,color=[COLORS[i%len(COLORS)] for i in y],s=32,zorder=3)
+        ax.set_yticks(y,[f'T{i+1}' for i in y]);ax.invert_yaxis();ax.set_xlim(0,1.06)
+        for i,value in enumerate(values):ax.text(1.01,i,f'{value:.3f}',transform=ax.get_yaxis_transform(),va='center')
+        ax.axvline(values.mean(),color='#727B82',linestyle='--',lw=.8,label=f'{self._get_label("mean")}: {values.mean():.3f}')
+        ax.legend(loc='upper center',bbox_to_anchor=(.5,1.18));ax.set_xlabel(self._get_label('exclusivity'))
+        ax.spines['left'].set_visible(False);ax.tick_params(axis='y',length=0)
+        self._save(self.global_dir/self._get_filename('topic_exclusivity'),dpi=self.dpi);plt.close(fig)
+
     def generate_metrics_summary(self):
         """Deprecated: Overlaps with generate_7_core_metrics_chart. Skipped."""
         print("  [SKIP] metrics_summary (replaced by 7_core_metrics_chart)")
         return
-    
+
     def generate_7_core_metrics_chart(self):
-        """Generate 7 core metrics summary chart with dual Y-axis layout.
-        
-        7 Core Metrics Standard:
-        1. TD (Topic Diversity) - Left Y-axis
-        2. iRBO (Inverse Rank-Biased Overlap) - Left Y-axis  
-        3. NPMI (Normalized PMI) - Left Y-axis
-        4. C_V (C_V Coherence) - Left Y-axis
-        5. UMass (UMass Coherence) - Left Y-axis
-        6. Exclusivity (Topic Exclusivity) - Left Y-axis
-        7. PPL (Perplexity) - Right Y-axis
-        """
-        if self.metrics is None:
-            print("  [SKIP] 7_core_metrics_chart (no metrics)")
-            return
-        
-        fig, ax_left = plt.subplots(figsize=(16, 6), facecolor='white')
-        ax_right = ax_left.twinx()
-        
-        # Left: 6 normalized metrics (0-1 scale)
-        metric_names = ['TD', 'iRBO', 'NPMI', 'C_V', 'UMass', 'Exclusivity']
-        metric_values = []
-        
-        for name in metric_names:
-            # Try different key formats
-            val = self.metrics.get(name) or self.metrics.get(f'topic_{name.lower()}') or 0.0
-            if val is None:
-                val = 0.0
-            metric_values.append(float(val))
-        
-        left_positions = np.arange(len(metric_names))
-        width = 0.6
-        
-        colors = plt.cm.Set2(np.linspace(0, 1, len(metric_names)))
-        bars_left = ax_left.bar(left_positions, metric_values, width, color=colors, 
-                              edgecolor='black', linewidth=0.8)
-        
-        for bar, val in zip(bars_left, metric_values):
-            height = bar.get_height()
-            if val >= 0:
-                ax_left.text(bar.get_x() + bar.get_width()/2, height + 0.01,
-                            f'{val:.3f}', ha='center', va='bottom', fontsize=10)
-            else:
-                ax_left.text(bar.get_x() + bar.get_width()/2, height - 0.01,
-                            f'{val:.3f}', ha='center', va='top', fontsize=10)
-        
-        # Right: PPL (separate scale)
-        ppl_value = self.metrics.get('PPL') or self.metrics.get('perplexity') or 1000.0
-        if ppl_value is None:
-            ppl_value = 1000.0
-        ppl_value = float(ppl_value)
-        
-        right_position = [6.5]
-        bars_right = ax_right.bar(right_position, [ppl_value], width, color='coral', 
-                               edgecolor='black', linewidth=0.8, alpha=0.8)
-        
-        ax_right.text(right_position[0], ppl_value + ppl_value * 0.02, f'{ppl_value:.1f}',
-                   ha='center', va='bottom', fontsize=12, fontweight='bold', color='coral')
-        
-        min_val = min(metric_values) if metric_values else 0
-        max_val = max(metric_values) if metric_values else 1.0
-        y_min = min(min_val * 1.2, -0.5) if min_val < 0 else 0
-        y_max = max(max_val * 1.2, 1.0)
-        ax_left.set_ylabel('Quality Metrics Score', fontsize=12, color='black')
-        ax_left.set_ylim(y_min, y_max)
-        
-        ax_right.set_ylabel('Perplexity (PPL)', fontsize=12, color='coral')
-        ax_right.set_ylim(0, 1600)
-        ax_right.tick_params(axis='y', labelcolor='coral')
-        
-        all_labels = metric_names + ['PPL']
-        all_positions = list(left_positions) + right_position
-        ax_left.set_xticks(all_positions)
-        ax_left.set_xticklabels(all_labels, rotation=15, ha='right')
-        
-        ax_left.grid(True, alpha=0.3, axis='y')
-        ax_left.spines['top'].set_visible(False)
-        ax_left.spines['right'].set_visible(False)
-        ax_right.spines['top'].set_visible(False)
-        ax_right.spines['left'].set_visible(False)
-        
-        
-        plt.tight_layout()
-        
-        plt.savefig(self.global_dir / self._get_filename('7_core_metrics'), dpi=self.dpi, bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('7_core_metrics')}")
-    
+        if not self.metrics:return
+        names=['TD','iRBO','NPMI','C_V','UMass','Exclusivity','PPL']
+        items=[(name,float(self.metrics[name])) for name in names if isinstance(self.metrics.get(name),(float,int)) and np.isfinite(self.metrics[name])]
+        if not items:return
+        cols=min(4,len(items));rows=int(np.ceil(len(items)/cols))
+        fig,axes=plt.subplots(rows,cols,figsize=(6.6,rows*1.25),squeeze=False,layout='constrained')
+        for ax,(name,value) in zip(axes.flat,items):
+            ax.axis('off');ax.plot([0,1],[.95,.95],transform=ax.transAxes,color='#D8E0E6',lw=.8)
+            ax.text(0,.7,name,transform=ax.transAxes,color='#5B6B72',fontsize=9)
+            text=ax.text(0,.24,f'{value:.4g}',transform=ax.transAxes,color=COLORS[0],fontsize=20);text.set_gid('metric-value')
+        for ax in list(axes.flat)[len(items):]:ax.axis('off')
+        fig.suptitle('模型评估 · 各指标保持原始量纲' if self.language=='zh' else 'Model evaluation · original metric scales',x=.02,ha='left',fontsize=10)
+        pd.DataFrame(items,columns=['metric','value']).to_csv(self.global_dir/'evaluation_metrics.csv',index=False)
+        self._save(self.global_dir/self._get_filename('7_core_metrics'),dpi=self.dpi);plt.close(fig)
+
     def generate_topic_significance_chart(self):
-        """Generate topic significance chart for visualization.
-        
-        Note: Significance is NOT part of 7 core evaluation metrics,
-        but is useful for visualization purposes.
-        """
-        if self.metrics is None:
-            print("  [SKIP] topic_significance_chart (no metrics)")
-            return
-        
-        # Try to get significance data
-        significance = self.metrics.get('Significance_per_topic') or self.metrics.get('topic_significance')
-        if significance is None:
-            # Compute from theta if available
-            if self.theta is not None:
-                significance = self.theta.mean(axis=0).tolist()
-            else:
-                print("  [SKIP] topic_significance_chart (no significance data)")
-                return
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        x = np.arange(len(significance))
-        colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(significance)))
-        
-        # Sort by significance for better visualization
-        sorted_indices = np.argsort(significance)[::-1]
-        sorted_sig = [significance[i] for i in sorted_indices]
-        sorted_labels = [f"主题{i+1}" if self.language == 'zh' else f'T{i+1}' for i in sorted_indices]
-        
-        ax.barh(range(len(sorted_sig)), sorted_sig, color=colors)
-        ax.set_yticks(range(len(sorted_sig)))
-        ax.set_yticklabels(sorted_labels)
-        ax.set_xlabel(self._get_label('significance_score'))
-        ax.invert_yaxis()
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_significance'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_significance')}")
-    
+        # Mean topic mass is not a significance test, and an undocumented score
+        # must not be presented as statistical evidence.
+        print('  [SKIP] topic_significance: no documented inferential test; use the observed mean-topic-weight chart')
+
+
     def generate_topic_num_evaluation(self, k_evaluation_data: dict = None):
         """Generate topic number evaluation chart showing metrics across different K values.
-        
+
         Args:
             k_evaluation_data: Dict with K values as keys and evaluation metrics as values.
                               Format: {k: {'coherence': float, 'exclusivity': float, 'perplexity': float}, ...}
                               If None, will try to load from evaluation files in parent directory.
         """
         current_k = self.n_topics
-        
+
         # Try to load real evaluation data
         if k_evaluation_data is None:
             k_evaluation_data = self._load_k_evaluation_data()
-        
+
         if k_evaluation_data is None or len(k_evaluation_data) < 2:
             print("  [SKIP] topic_num_evaluation (need evaluation results for at least 2 different K values)")
             print("         To generate this chart, run training with different topic numbers (K)")
             print("         and save evaluation results, then re-run visualization.")
             return
-        
-        # Extract data
-        k_values = sorted(k_evaluation_data.keys())
-        coherence_values = [k_evaluation_data[k].get('coherence', 0) for k in k_values]
-        exclusivity_values = [k_evaluation_data[k].get('exclusivity', 0) for k in k_values]
-        perplexity_values = [k_evaluation_data[k].get('perplexity', 0) for k in k_values]
-        
-        # Normalize perplexity (inverse, lower is better) for plotting
-        if max(perplexity_values) > min(perplexity_values):
-            ppl_min, ppl_max = min(perplexity_values), max(perplexity_values)
-            # Inverse normalize: lower perplexity = higher score
-            perplexity_normalized = [(ppl_max - v) / (ppl_max - ppl_min) for v in perplexity_values]
-        else:
-            perplexity_normalized = [0.5] * len(perplexity_values)
-        
-        # Create figure with MATLAB-style colors
-        fig, ax = plt.subplots(figsize=(12, 7))
-        
-        # MATLAB-style colors
-        ax.plot(k_values, coherence_values, 'o-', color='#0072BD', linewidth=2.5, 
-               markersize=10, label='Coherence (NPMI)')
-        ax.plot(k_values, exclusivity_values, 's-', color='#D95319', linewidth=2.5, 
-               markersize=10, label='Exclusivity')
-        ax.plot(k_values, perplexity_normalized, '^-', color='#77AC30', linewidth=2.5, 
-               markersize=10, label='Perplexity (inv. norm)')
-        
-        # Mark current K
-        if current_k in k_values:
-            ax.axvline(x=current_k, color='#A2142F', linestyle='--', linewidth=2, alpha=0.7)
-            ax.annotate(f'Current K={current_k}',
-                       xy=(current_k, max(max(coherence_values), max(exclusivity_values)) * 0.95), 
-                       fontsize=11, color='#A2142F',
-                       ha='center', fontweight='bold')
-        
-        ax.set_xlabel(self._get_label('num_topics'), fontsize=12)
-        ax.set_ylabel(self._get_label('score'), fontsize=12)
-        ax.set_xticks(k_values)
-        ax.legend(loc='best', fontsize=10)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_num_evaluation'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_num_evaluation')}")
-    
+
+        k_values = sorted(k_evaluation_data)
+        fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.8))
+        for ax, key, label, color in zip(axes, ['coherence','exclusivity','perplexity'],
+                                        ['NPMI','Exclusivity','Perplexity'], COLORS):
+            values = [k_evaluation_data[k].get(key, np.nan) for k in k_values]
+            ax.plot(k_values, values, 'o-', color=color, markersize=3, linewidth=1)
+            if current_k in k_values: ax.axvline(current_k, color='#999999', linestyle='--', linewidth=.6)
+            ax.set_xlabel('K'); ax.set_ylabel(label); ax.set_xticks(k_values)
+        pd.DataFrame.from_dict(k_evaluation_data,orient='index').sort_index().to_csv(self.global_dir/'k_evaluation.csv',index_label='K')
+        self._save(self.global_dir / self._get_filename('topic_num_evaluation'), dpi=self.dpi)
+        plt.close(fig)
+
     def _load_k_evaluation_data(self) -> dict:
         """Load evaluation data for different K values from evaluation directory.
-        
+
         Looks for evaluation JSON files in the parent evaluation directory
         with format: evaluation_k{K}.json or in subdirectories named k{K}/
-        
+
         Returns:
             Dict with K values as keys and metrics as values, or None if not found.
         """
         import json
-        
+
         # Try to find evaluation directory (go up from visualization output dir)
         eval_dir = None
         current_dir = self.output_dir
-        
+
         # Navigate up to find evaluation directory
         for _ in range(5):  # Max 5 levels up
             parent = current_dir.parent
@@ -1751,12 +957,12 @@ class VisualizationGenerator:
                 eval_dir = potential_k_eval
                 break
             current_dir = parent
-        
+
         if eval_dir is None:
             return None
-        
+
         k_data = {}
-        
+
         # Pattern 1: Look for evaluation_k{K}.json files
         for eval_file in eval_dir.glob('evaluation_k*.json'):
             try:
@@ -1771,7 +977,7 @@ class VisualizationGenerator:
                 }
             except (ValueError, json.JSONDecodeError):
                 continue
-        
+
         # Pattern 2: Look for k{K}/ subdirectories with evaluation.json
         for k_dir in eval_dir.glob('k*'):
             if k_dir.is_dir():
@@ -1789,7 +995,7 @@ class VisualizationGenerator:
                         }
                 except (ValueError, json.JSONDecodeError):
                     continue
-        
+
         # Pattern 3: Look in parent's sibling directories (for different K trainings)
         # e.g., /result/0.6B/FCPB/unsupervised_k10/, /result/0.6B/FCPB/unsupervised_k20/
         mode_dir = self.output_dir
@@ -1797,7 +1003,7 @@ class VisualizationGenerator:
             mode_dir = mode_dir.parent
             if mode_dir.name in ['unsupervised', 'supervised', 'zero_shot']:
                 break
-        
+
         if mode_dir.parent.exists():
             base_mode = mode_dir.name
             for sibling in mode_dir.parent.glob(f'{base_mode}_k*'):
@@ -1816,371 +1022,97 @@ class VisualizationGenerator:
                             }
                     except (ValueError, json.JSONDecodeError):
                         continue
-        
+
         return k_data if k_data else None
-    
+
     def generate_sankey_diagram(self):
-        """Generate topic evolution Sankey diagram with custom colors."""
-        if self.timestamps is None:
-            print("  [SKIP] sankey_diagram (no timestamps)")
+        """Observed group-to-topic allocations, never inferred cross-year migrations."""
+        scopes=[]
+        if self.timestamps is not None:
+            valid=~pd.isna(self.timestamps)
+            if valid.any():
+                years=np.array([str(t.year) for t in np.asarray(self.timestamps)[valid]])
+                scopes.append(('year',years,self.theta[valid],sorted(set(years))))
+        if self.dimension_values is not None:
+            groups=np.asarray([str(g) for g in self.dimension_values])
+            scopes.append(('source',groups,self.theta,list(pd.Series(groups).value_counts().index)))
+        if not scopes:
+            print('[SKIP] sankey_diagram: needs verified dates or source labels')
             return
-        
-        try:
+        for kind,groups,theta,labels in scopes:
+            if not np.isfinite(theta).all() or (theta<0).any() or theta.sum()<=0:
+                raise ValueError('Sankey allocation requires finite nonnegative topic weights')
+            mass=np.array([theta[groups==group].sum(axis=0,dtype=np.float64) for group in labels])
+            counts=np.array([(groups==group).sum() for group in labels])
+            title=('年份 → 主题' if kind=='year' else '来源 → 主题') if self.language=='zh' else ('Year → topic' if kind=='year' else 'Source → topic')
+            title+=(' · 权重分配桑基图' if self.language=='zh' else ' · weight allocation Sankey')
+            records=[{'group':group,'n_documents':int(counts[i]),'topic_id':j+1,'weight_mass':float(mass[i,j])}
+                     for i,group in enumerate(labels) for j in range(self.n_topics)]
+            pd.DataFrame(records).to_csv(self.global_dir/f'{kind}_topic_sankey.csv',index=False)
+            self._generate_sankey_matplotlib(mass,labels,counts,title,kind)
+            # Preserve the repository's interactive Plotly delivery, with real link masses.
             import plotly.graph_objects as go
-        except ImportError:
-            print("  [SKIP] sankey_diagram (plotly not installed)")
-            self._generate_sankey_matplotlib()
-            return
-        
-        # Divide timestamps into periods
-        years = sorted(set([t.year for t in self.timestamps]))
-        if len(years) < 2:
-            print("  [SKIP] sankey_diagram (need at least 2 years)")
-            return
-        
-        # Create period bins
-        n_periods = min(5, len(years))
-        period_size = len(years) // n_periods
-        periods = []
-        for i in range(n_periods):
-            start_year = years[i * period_size]
-            end_year = years[min((i + 1) * period_size - 1, len(years) - 1)]
-            periods.append((start_year, end_year))
-        
-        # Calculate topic proportions per period
-        period_topic_props = []
-        for start_year, end_year in periods:
-            mask = np.array([(start_year <= t.year <= end_year) for t in self.timestamps])
-            if mask.sum() > 0:
-                period_theta = self.theta[mask].mean(axis=0)
-                period_topic_props.append(period_theta)
-            else:
-                period_topic_props.append(np.zeros(self.n_topics))
-        
-        # Custom color palette for topics
-        color_palette = [
-            '#E8847C', '#9B7BB8', '#7CB87C', '#6BAED6', '#FD8D3C',
-            '#74C476', '#9E9AC8', '#FDD0A2', '#C6DBEF', '#DADAEB',
-            '#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854',
-            '#ffd92f', '#e5c494', '#b3b3b3', '#1f78b4', '#33a02c'
-        ]
-        
-        # Build Sankey data
-        source = []
-        target = []
-        value = []
-        labels = []
-        node_colors = []
-        link_colors = []
-        
-        # Create labels and colors for each period-topic combination
-        for p_idx, (start_year, end_year) in enumerate(periods):
-            for t_idx in range(self.n_topics):
-                labels.append(f"P{p_idx+1}-T{t_idx+1}")
-                node_colors.append(color_palette[t_idx % len(color_palette)])
-        
-        # Create flows between consecutive periods
-        for p_idx in range(len(periods) - 1):
-            for t_idx in range(self.n_topics):
-                source_idx = p_idx * self.n_topics + t_idx
-                target_idx = (p_idx + 1) * self.n_topics + t_idx
-                flow_value = (period_topic_props[p_idx][t_idx] + period_topic_props[p_idx + 1][t_idx]) / 2
-                if flow_value > 0.01:  # Filter small flows
-                    source.append(source_idx)
-                    target.append(target_idx)
-                    value.append(flow_value * 100)  # Scale for visibility
-                    # Link color with transparency
-                    hex_color = color_palette[t_idx % len(color_palette)].lstrip('#')
-                    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-                    link_colors.append(f'rgba({r},{g},{b},0.4)')
-        
-        # Create Sankey diagram
-        fig = go.Figure(data=[go.Sankey(
-            arrangement='snap',
-            node=dict(
-                pad=15,
-                thickness=20,
-                line=dict(color="black", width=0.5),
-                label=labels,
-                color=node_colors
-            ),
-            link=dict(
-                source=source,
-                target=target,
-                value=value,
-                color=link_colors
-            )
-        )])
-        
-        title = 'Topic Evolution Sankey Diagram'
-        fig.update_layout(
-            title_text=title, 
-            font_size=11,
-            width=1600,
-            height=900,
-            paper_bgcolor='white',
-            plot_bgcolor='white'
-        )
-        
-        # Save as HTML (Sankey diagrams are interactive)
-        fig.write_html(str(self.global_dir / 'topic_sankey.html'))
-        # Also save as static image if possible
-        try:
-            fig.write_image(str(self.global_dir / 'topic_sankey.png'), scale=2)
-            print("  ✓ topic_sankey.png/html")
-        except:
-            print("  ✓ topic_sankey.html (static image requires kaleido)")
-            self._generate_sankey_matplotlib()
-    
-    def _generate_sankey_matplotlib(self):
-        """Generate Tableau-style Sankey diagram using matplotlib.
-        
-        Tableau-style design:
-        - Vertically arranged nodes for each time period
-        - Node height represents topic strength
-        - Smooth Bezier curves represent topic flow
-        - Supports topic splitting and merging
-        """
-        from matplotlib.patches import FancyBboxPatch, PathPatch
-        from matplotlib.path import Path
-        import matplotlib.font_manager as fm
-        
-        font_prop = None
-        if self.language == 'zh':
-            import platform
-            system = platform.system().lower()
-            
-            # Try platform-specific font paths
-            font_candidates = []
-            if system == 'windows':
-                font_candidates = [
-                    'C:/Windows/Fonts/msyh.ttc',      # Microsoft YaHei
-                    'C:/Windows/Fonts/simhei.ttf',    # SimHei
-                    'C:/Windows/Fonts/simsun.ttc',    # SimSun
-                    'C:/Windows/Fonts/NSimSun.ttf',   # NSimSun
-                ]
-            elif system == 'linux':
-                font_candidates = [
-                    '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
-                    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                ]
-            elif system == 'darwin':  # macOS
-                font_candidates = [
-                    '/System/Library/Fonts/PingFang.ttc',
-                    '/System/Library/Fonts/STHeiti Light.ttc',
-                    '/System/Library/Fonts/STHeiti Medium.ttc',
-                ]
-            
-            for font_path in font_candidates:
-                if os.path.exists(font_path):
-                    try:
-                        font_prop = fm.FontProperties(fname=font_path)
-                        break
-                    except Exception as e:
-                        print(f"Warning: Could not load font {font_path}: {e}")
-                        continue
-        
-        years = sorted(set([t.year for t in self.timestamps]))
-        if len(years) < 2:
-            return
-        
-        years_arr = np.array([t.year for t in self.timestamps])
-        
-        if len(years) > 8:
-            n_periods = 6
-            period_size = len(years) // n_periods
-            periods = []
-            for i in range(n_periods):
-                start_idx = i * period_size
-                end_idx = len(years) - 1 if i == n_periods - 1 else (i + 1) * period_size - 1
-                periods.append((years[start_idx], years[end_idx]))
-            display_labels = [f"{s}-{e}" if s != e else str(s) for s, e in periods]
-        else:
-            periods = [(y, y) for y in years]
-            display_labels = [str(y) for y in years]
-        
-        period_props = []
-        for start_year, end_year in periods:
-            mask = (years_arr >= start_year) & (years_arr <= end_year)
-            if mask.sum() > 0:
-                period_props.append(self.theta[mask].mean(axis=0))
-            else:
-                period_props.append(np.zeros(self.n_topics))
-        
-        n_top = min(8, self.n_topics)
-        avg_strength = np.mean(period_props, axis=0)
-        top_topics = np.argsort(avg_strength)[-n_top:][::-1]
-        
-        topic_labels = {}
-        for t_idx in top_topics:
-            if t_idx < len(self.topic_words):
-                words = self.topic_words[t_idx][1][:2]
-                label = ', '.join([w[0] for w in words])
-                topic_labels[t_idx] = f"{self._get_label('topic')}{t_idx+1}: {label}" if self.language == 'zh' else f"T{t_idx+1}: {label}"
-            else:
-                topic_labels[t_idx] = f"{self._get_label('topic')} {t_idx+1}" if self.language == 'zh' else f"Topic {t_idx+1}"
-        
-        color_palette = [
-            '#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F',
-            '#EDC948', '#B07AA1', '#FF9DA7', '#9C755F', '#BAB0AC'
-        ]
-        topic_colors = {t: color_palette[i % len(color_palette)] for i, t in enumerate(top_topics)}
-        
-        fig, ax = plt.subplots(figsize=(20, 12))
-        
-        n_periods = len(periods)
-        
-        x_margin = 0.08
-        x_range = 1 - 2 * x_margin
-        node_width = 0.032
-        y_margin = 0.12
-        y_range = 1 - 2 * y_margin
-        gap = 0.006
-        
-        node_positions = {}  # (period_idx, topic_idx) -> (x, y_bottom, y_top)
-        
-        for p_idx in range(n_periods):
-            x = x_margin + p_idx * x_range / max(n_periods - 1, 1)
-            
-            strengths = [(t, period_props[p_idx][t]) for t in top_topics]
-            strengths = [(t, max(s, 0.005)) for t, s in strengths]
-            strengths.sort(key=lambda x: -x[1])
-            
-            total = sum(s for _, s in strengths)
-            y_current = y_margin + y_range * 0.95
-            
-            for topic_idx, strength in strengths:
-                height = (strength / total) * y_range * 0.88
-                height = max(height, 0.022)
-                
-                rect = FancyBboxPatch(
-                    (x - node_width/2, y_current - height),
-                    node_width, height,
-                    boxstyle="round,pad=0.002,rounding_size=0.005",
-                    facecolor=topic_colors[topic_idx],
-                    edgecolor='white',
-                    linewidth=1.2,
-                    alpha=0.92,
-                    zorder=10
-                )
-                ax.add_patch(rect)
-                
-                node_positions[(p_idx, topic_idx)] = (x, y_current - height, y_current)
-                
-                text_kwargs = {'fontproperties': font_prop} if font_prop else {}
-                if p_idx == 0:
-                    ax.text(x - node_width/2 - 0.008, y_current - height/2, 
-                           topic_labels[topic_idx],
-                           ha='right', va='center', fontsize=8,
-                           fontweight='bold', color=topic_colors[topic_idx], **text_kwargs)
-                elif p_idx == n_periods - 1:
-                    ax.text(x + node_width/2 + 0.008, y_current - height/2,
-                           topic_labels[topic_idx],
-                           ha='left', va='center', fontsize=8,
-                           fontweight='bold', color=topic_colors[topic_idx], **text_kwargs)
-                elif height > 0.035:
-                    ax.text(x, y_current - height/2, f"T{topic_idx+1}",
-                           ha='center', va='center', fontsize=6,
-                           fontweight='bold', color='white')
-                
-                y_current -= height + gap
-            
-            ax.text(x, y_margin - 0.035, display_labels[p_idx], 
-                   ha='center', va='top', fontsize=10, fontweight='bold')
-        
-        for p_idx in range(n_periods - 1):
-            for src_topic in top_topics:
-                if (p_idx, src_topic) not in node_positions:
-                    continue
-                
-                src_x, src_y_bot, src_y_top = node_positions[(p_idx, src_topic)]
-                src_strength = period_props[p_idx][src_topic]
-                src_height = src_y_top - src_y_bot
-                
-                flows = []
-                for tgt_topic in top_topics:
-                    if (p_idx + 1, tgt_topic) not in node_positions:
-                        continue
-                    
-                    tgt_strength = period_props[p_idx + 1][tgt_topic]
-                    
-                    if src_topic == tgt_topic:
-                        flow = min(src_strength, tgt_strength)
-                    else:
-                        sim = np.dot(self.beta[src_topic], self.beta[tgt_topic]) / \
-                              (np.linalg.norm(self.beta[src_topic]) * np.linalg.norm(self.beta[tgt_topic]) + 1e-10)
-                        flow = sim * min(src_strength, tgt_strength) * 0.4 if sim > 0.25 else 0
-                    
-                    if flow > 0.003:
-                        flows.append((tgt_topic, flow))
-                
-                if not flows:
-                    continue
-                
-                total_flow = sum(f for _, f in flows)
-                src_y_current = src_y_bot
-                
-                for tgt_topic, flow in flows:
-                    tgt_x, tgt_y_bot, tgt_y_top = node_positions[(p_idx + 1, tgt_topic)]
-                    
-                    flow_height = (flow / total_flow) * src_height * 0.92
-                    tgt_y_center = (tgt_y_bot + tgt_y_top) / 2
-                    tgt_flow_height = flow_height * 0.75
-                    
-                    self._draw_sankey_flow(
-                        ax,
-                        src_x + node_width/2, src_y_current, src_y_current + flow_height,
-                        tgt_x - node_width/2, tgt_y_center - tgt_flow_height/2, tgt_y_center + tgt_flow_height/2,
-                        topic_colors[src_topic],
-                        alpha=0.4
-                    )
-                    
-                    src_y_current += flow_height
-        
-        ax.set_xlim(-0.02, 1.02)
-        ax.set_ylim(0, 1)
-        ax.axis('off')
-        
-        plt.tight_layout()
-        plt.savefig(self.global_dir / self._get_filename('topic_sankey'), dpi=self.dpi,
-                   bbox_inches='tight', facecolor='white')
-        plt.close()
-        print(f"  ✓ {self._get_filename('topic_sankey')}")
-    
-    def _draw_sankey_flow(self, ax, x1, y1_bot, y1_top, x2, y2_bot, y2_top, color, alpha=0.4):
-        """绘制平滑贝塞尔曲线流向"""
-        from matplotlib.patches import PathPatch
-        from matplotlib.path import Path
-        
-        ctrl = (x2 - x1) * 0.45
-        
-        verts = [
-            (x1, y1_top),
-            (x1 + ctrl, y1_top),
-            (x2 - ctrl, y2_top),
-            (x2, y2_top),
-            (x2, y2_bot),
-            (x2 - ctrl, y2_bot),
-            (x1 + ctrl, y1_bot),
-            (x1, y1_bot),
-            (x1, y1_top),
-        ]
-        
-        codes = [
-            Path.MOVETO,
-            Path.CURVE4, Path.CURVE4, Path.CURVE4,
-            Path.LINETO,
-            Path.CURVE4, Path.CURVE4, Path.CURVE4,
-            Path.CLOSEPOLY,
-        ]
-        
-        path = Path(verts, codes)
-        patch = PathPatch(path, facecolor=color, edgecolor='none', alpha=alpha, zorder=5)
-        ax.add_patch(patch)
-    
+            source=[];target=[];values=[];colors=[]
+            for i in range(len(labels)):
+                for j in range(self.n_topics):
+                    if mass[i,j]>0:
+                        source.append(i);target.append(len(labels)+j);values.append(float(mass[i,j]))
+                        r,g,b=matplotlib.colors.to_rgb(COLORS[j%len(COLORS)])
+                        colors.append(f'rgba({int(r*255)},{int(g*255)},{int(b*255)},0.45)')
+            nodes=[f'{g} (n={n:,})' for g,n in zip(labels,counts)]+[f'T{j+1}' for j in range(self.n_topics)]
+            # Keep the same year/topic order as the static figure; Plotly's auto layout reorders both.
+            gap=min(.045,.5/max(max(mass.shape)-1,1));scale=1-gap*(max(mass.shape)-1)
+            centers=[]
+            for heights in [mass.sum(axis=1)/mass.sum()*scale,mass.sum(axis=0)/mass.sum()*scale]:
+                occupied=heights.sum()+gap*(len(heights)-1)
+                centers.extend(((1-occupied)/2+np.r_[0,np.cumsum(heights[:-1]+gap)]+heights/2).tolist())
+            fig=go.Figure(go.Sankey(arrangement='fixed',node=dict(label=nodes,pad=gap*(800-90-30),thickness=15,
+                          x=[.02]*len(labels)+[.98]*self.n_topics,y=centers,
+                          color=['#96A6B1']*len(labels)+[COLORS[j%len(COLORS)] for j in range(self.n_topics)]),
+                          link=dict(source=source,target=target,value=values,color=colors,
+                                    hovertemplate='%{source.label} → %{target.label}<br>Weight mass: %{value:.4f}<extra></extra>')))
+            note='每条带表示同组文档的主题权重合计，不表示跨期迁移。' if self.language=='zh' else 'Links sum topic weights within a group; they do not represent migration.'
+            fig.update_layout(title=title+'<br><sup>'+note+'</sup>',font_size=12,height=800,paper_bgcolor='white',margin=dict(l=30,r=30,t=90,b=30))
+            path=self.global_dir/f'{kind}_topic_sankey.html';fig.write_html(str(path),include_plotlyjs=True)
+            self.exported_files.append(str(path))
+
+    def _generate_sankey_matplotlib(self,mass,labels,counts,title,kind):
+        """Native Bezier ribbons, with identical conserved mass on both sides."""
+        from matplotlib.path import Path as MplPath
+        from matplotlib.patches import PathPatch,Rectangle
+        from textwrap import fill
+        total=mass.sum();flow=mass/total
+        gap=min(.045,.5/max(max(mass.shape)-1,1));scale=1-gap*(max(mass.shape)-1)
+        left=flow.sum(axis=1)*scale;right=flow.sum(axis=0)*scale
+        def positions(heights):
+            occupied=heights.sum()+gap*(len(heights)-1)
+            return (1+occupied)/2-np.r_[0,np.cumsum(heights[:-1]+gap)]
+        ly=positions(left);ry=positions(right);lo=ly.copy();ro=ry.copy()
+        fig,ax=plt.subplots(figsize=(7.2,max(4,min(6.5,len(labels)*.4))))
+        for i in range(len(labels)):
+            for j in range(self.n_topics):
+                width=flow[i,j]*scale
+                if width<=0:continue
+                y1,y2=lo[i],ro[j]
+                vertices=[(.025,y1),(.4,y1),(.6,y2),(.975,y2),(.975,y2-width),(.6,y2-width),(.4,y1-width),(.025,y1-width),(.025,y1)]
+                path=MplPath(vertices,[MplPath.MOVETO]+[MplPath.CURVE4]*3+[MplPath.LINETO]+[MplPath.CURVE4]*3+[MplPath.CLOSEPOLY])
+                ax.add_patch(PathPatch(path,facecolor=COLORS[j%len(COLORS)],edgecolor='none',alpha=.40))
+                lo[i]-=width;ro[j]-=width
+        for i,label in enumerate(labels):
+            ax.add_patch(Rectangle((0,ly[i]-left[i]),.025,left[i],facecolor='#738897',edgecolor='none'))
+            ax.text(-.025,ly[i]-left[i]/2,fill(str(label),16)+f' · n={counts[i]:,}',ha='right',va='center',fontsize=7)
+        terms=dict(self.topic_words)
+        for j in range(self.n_topics):
+            ax.add_patch(Rectangle((.975,ry[j]-right[j]),.025,right[j],facecolor=COLORS[j%len(COLORS)],edgecolor='none'))
+            label=f'T{j+1}  '+ ' · '.join(w for w,_ in terms.get(j,[])[:2])
+            ax.text(1.025,ry[j]-right[j]/2,label+f'  {flow[:,j].sum():.1%}',va='center',fontsize=7)
+        ax.set_xlim(-.38,1.65);ax.set_ylim(-.06,1.06);ax.axis('off');ax.set_title(title,pad=15)
+        note='带宽 = 主题权重合计；不表示跨期迁移。' if self.language=='zh' else 'Width = sum of topic weights; not cross-period migration.'
+        ax.text(0,-.025,note,transform=ax.transAxes,fontsize=7,color='#667C8A')
+        self._save(self.global_dir/f'{kind}_topic_sankey.png',dpi=self.dpi);plt.close(fig)
+
     # ========== MAIN GENERATION ==========
-    
+
     def generate_all(self):
         """Generate all visualizations."""
         print(f"\n{'='*60}")
@@ -2193,65 +1125,88 @@ class VisualizationGenerator:
         print(f"  - training_history: {'Yes' if self.training_history is not None else 'No'}")
         print(f"  - metrics: {'Yes' if self.metrics is not None else 'No'}")
         print(f"{'='*60}")
-        
+
         chart_count = 0
-        
+        temporal = None
+        if self.timestamps is not None:
+            from copy import copy
+            valid = ~pd.isna(self.timestamps)
+            if valid.any():
+                temporal = copy(self)
+                temporal.theta = self.theta[valid]
+                temporal.timestamps = np.asarray(self.timestamps)[valid]
+                temporal.n_docs = int(valid.sum())
+                if self.bow_matrix is not None: temporal.bow_matrix = self.bow_matrix[valid]
+                if self.dimension_values is not None: temporal.dimension_values = np.asarray(self.dimension_values)[valid]
+            (self.output_dir / 'temporal-scope.json').write_text(json.dumps({
+                'allDocuments': self.n_docs, 'datedDocuments': int(valid.sum()),
+                'excludedMissingDate': int((~valid).sum()),
+                'note': 'Only temporal charts exclude missing dates; global charts use all model rows.'}, indent=2))
+
+
+        statuses = []
         def safe_generate(func, name):
-            """Safely generate a chart, catching any errors."""
-            nonlocal chart_count
+            from contextlib import redirect_stdout
+            from io import StringIO
+            before = len(self.exported_files)
+            output = StringIO()
             try:
-                func()
-                chart_count += 1
-                return True
-            except Exception as e:
-                print(f"  [Error] {name}: {e}")
-                return False
-        
+                with redirect_stdout(output): func()
+                created = self.exported_files[before:]
+                statuses.append({'chart': name, 'status': 'generated' if created else 'skipped',
+                                 'files': created, 'detail': output.getvalue().strip()})
+            except Exception as exc:
+                statuses.append({'chart': name, 'status': 'failed', 'detail': str(exc)})
+                plt.close('all')
+                print(f'  [Error] {name}: {exc}')
+            print(output.getvalue(), end='')
+
         # ========== Basic Global Charts (always available) ==========
         print(f"\n[Basic Global Charts]")
         safe_generate(self.generate_topic_table, 'topic_table')
         safe_generate(self.generate_topic_network, 'topic_network')
+        safe_generate(lambda: self.generate_topic_network(layout='circular'), 'topic_network_circular')
         safe_generate(self.generate_doc_clusters, 'doc_clusters')
         safe_generate(self.generate_clustering_heatmap, 'clustering_heatmap')
         safe_generate(self.generate_clusters_with_outliers, 'clusters_with_outliers')
         safe_generate(self.generate_topic_proportion_pie, 'topic_proportion_pie')
-        
+        safe_generate(self.generate_sankey_diagram, 'sankey_diagram')
+
         # ========== Temporal Global Charts (need timestamps) ==========
         print(f"\n[Temporal Global Charts]")
-        if self.timestamps is not None:
-            safe_generate(self.generate_doc_volume, 'doc_volume')
-            safe_generate(self.generate_representative_topic_evolution, 'representative_topic_evolution')
-            safe_generate(self.generate_kl_divergence, 'kl_divergence')
+        if temporal is not None:
+            safe_generate(temporal.generate_doc_volume, 'doc_volume')
+            safe_generate(temporal.generate_representative_topic_evolution, 'representative_topic_evolution')
+            safe_generate(temporal.generate_kl_divergence, 'kl_divergence')
             if self.bow_matrix is not None:
-                safe_generate(self.generate_vocab_evolution, 'vocab_evolution')
-            safe_generate(self.generate_sankey_diagram, 'sankey_diagram')
-            safe_generate(self.generate_topic_similarity_evolution, 'topic_similarity_evolution')
-            safe_generate(self.generate_all_topics_strength_table, 'all_topics_strength_table')
+                safe_generate(temporal.generate_vocab_evolution, 'vocab_evolution')
+            safe_generate(temporal.generate_topic_similarity_evolution, 'topic_similarity_evolution')
+            safe_generate(temporal.generate_all_topics_strength_table, 'all_topics_strength_table')
         else:
-            print("  [Skip] No timestamps available")
-        
+            statuses.append({'chart':'temporal_charts','status':'skipped','detail':'No verified dates: yearly volume, topic trends and yearly heatmap are unavailable.'})
+
         # ========== Dimension Charts (need dimension_values) ==========
         print(f"\n[Dimension Charts]")
         if self.dimension_values is not None:
             safe_generate(self.generate_dimension_heatmap, 'dimension_heatmap')
-            if self.timestamps is not None:
-                safe_generate(self.generate_domain_topic_distribution, 'domain_topic_distribution')
+            if temporal is not None:
+                safe_generate(temporal.generate_domain_topic_distribution, 'domain_topic_distribution')
         else:
-            print("  [Skip] No dimension values available")
-        
+            statuses.append({'chart':'group_charts','status':'skipped','detail':'No verified source/group labels: group heatmap and trends are unavailable.'})
+
         # ========== Training & Metrics Charts ==========
         print(f"\n[Training & Metrics Charts]")
         if self.training_history is not None:
             safe_generate(self.generate_training_convergence, 'training_convergence')
         else:
-            print("  [Skip] No training history available")
+            statuses.append({'chart':'training_convergence','status':'skipped','detail':'No saved training history; loss and perplexity curves cannot be reconstructed.'})
         if self.metrics is not None:
             safe_generate(self.generate_topic_coherence_chart, 'topic_coherence_chart')
             safe_generate(self.generate_topic_diversity_chart, 'topic_diversity_chart')
             safe_generate(self.generate_7_core_metrics_chart, '7_core_metrics_chart')
             safe_generate(self.generate_topic_significance_chart, 'topic_significance_chart')
         safe_generate(self.generate_topic_num_evaluation, 'topic_num_evaluation')
-        
+
         # ========== Per-Topic Charts ==========
         print(f"\n[Per-Topic Charts]")
         for topic_idx in range(self.n_topics):
@@ -2262,65 +1217,64 @@ class VisualizationGenerator:
             #     chart_count += 1
             # except Exception as e:
             #     print(f"[Error] word_importance: {e}", end=' ')
-            if self.timestamps is not None:
-                try:
-                    self.generate_topic_evolution(topic_idx)
-                    self.generate_topic_word_dist_change(topic_idx)
-                    self.generate_topic_word_sense(topic_idx)
-                    chart_count += 3
-                except Exception as e:
-                    print(f"[Error] evolution: {e}", end=' ')
+            if temporal is not None:
+                for name in ['generate_topic_evolution', 'generate_topic_word_dist_change', 'generate_topic_word_sense']:
+                    safe_generate(lambda name=name, topic_idx=topic_idx: getattr(temporal, name)(topic_idx), f'{name}:T{topic_idx+1}')
             print("✓")
-        
+
         print(f"\n{'='*60}")
-        print(f"Done! Total charts generated: ~{chart_count}")
+        (self.output_dir / 'chart-status.json').write_text(json.dumps(statuses, ensure_ascii=False, indent=2))
+        print(f"Done! Actual PNG/PDF/SVG files: {sum(1 for f in self.output_dir.rglob('*') if f.suffix in {'.png', '.pdf', '.svg'})}")
         print(f"{'='*60}")
+
+        if any(item['status'] == 'failed' for item in statuses):
+            raise RuntimeError('One or more visualizations failed; inspect chart-status.json')
 
 
 def load_model_data(model_dir, bow_dir=None, result_dir=None):
     """
     Load model data from directory.
-    
+
     Args:
         model_dir: Directory containing ETM model outputs (theta, beta, topic_words, etc.)
-        bow_dir: Directory containing BOW data (bow_matrix.npz, vocab.txt). 
+        bow_dir: Directory containing BOW data (bow_matrix.npz, vocab.txt).
                  If None, will try to find it relative to model_dir.
         result_dir: Base result directory for timestamps.npy.
                     If None, will try to find it relative to model_dir.
-    
+
     Returns:
-        dict with keys: theta, beta, topic_embeddings, topic_words, vocab, 
+        dict with keys: theta, beta, topic_embeddings, topic_words, vocab,
                        bow_matrix, timestamps, config
     """
     from scipy import sparse
-    
+
     model_dir = Path(model_dir)
-    
+
     def find_latest(directory, pattern):
         files = list(Path(directory).glob(pattern))
         return max(files, key=lambda x: x.stat().st_mtime) if files else None
-    
+
     data = {}
-    
+
     # ========== Load from model_dir ==========
     # Load theta
     theta_file = find_latest(model_dir, "theta_*.npy")
     if theta_file:
         data['theta'] = np.load(theta_file)
         print(f"  Loaded theta: {data['theta'].shape}")
-    
+
     # Load beta
     beta_file = find_latest(model_dir, "beta_*.npy")
     if beta_file:
         data['beta'] = np.load(beta_file)
         print(f"  Loaded beta: {data['beta'].shape}")
-    
+
     # Load topic embeddings
     emb_file = find_latest(model_dir, "topic_embeddings_*.npy")
     if emb_file:
         data['topic_embeddings'] = np.load(emb_file)
         print(f"  Loaded topic_embeddings: {data['topic_embeddings'].shape}")
-    
+
     # Load topic words
     words_file = find_latest(model_dir, "topic_words_*.json")
     if words_file:
@@ -2331,21 +1285,21 @@ def load_model_data(model_dir, bow_dir=None, result_dir=None):
             for k, v in sorted(topic_words_dict.items(), key=lambda x: int(x[0]))
         ]
         print(f"  Loaded topic_words: {len(data['topic_words'])} topics")
-    
+
     # Load config
     config_file = find_latest(model_dir, "config_*.json")
     if config_file:
         with open(config_file, 'r', encoding='utf-8') as f:
             data['config'] = json.load(f)
         print(f"  Loaded config")
-    
+
     # Load training history
     history_file = find_latest(model_dir, "training_history_*.json")
     if history_file:
         with open(history_file, 'r', encoding='utf-8') as f:
             data['training_history'] = json.load(f)
         print(f"  Loaded training_history")
-    
+
     # ========== Load from bow_dir ==========
     # Try to find bow_dir if not specified
     if bow_dir is None:
@@ -2354,29 +1308,29 @@ def load_model_data(model_dir, bow_dir=None, result_dir=None):
         possible_bow_dir = model_dir.parent.parent / 'bow'
         if possible_bow_dir.exists():
             bow_dir = possible_bow_dir
-    
+
     if bow_dir and Path(bow_dir).exists():
         bow_dir = Path(bow_dir)
-        
+
         # Load BOW matrix
         bow_file = bow_dir / 'bow_matrix.npy'
         if bow_file.exists():
             data['bow_matrix'] = np.load(bow_file)
             print(f"  Loaded bow_matrix: {data['bow_matrix'].shape}")
-        
+
         # Load vocab (real vocabulary, not word_0, word_1, ...)
         vocab_file = bow_dir / 'vocab.txt'
         if vocab_file.exists():
             with open(vocab_file, 'r', encoding='utf-8') as f:
                 data['vocab'] = [line.strip() for line in f.readlines()]
             print(f"  Loaded vocab: {len(data['vocab'])} words")
-        
+
         # Load vocab embeddings
         vocab_emb_file = bow_dir / 'vocab_embeddings.npy'
         if vocab_emb_file.exists():
             data['vocab_embeddings'] = np.load(vocab_emb_file)
             print(f"  Loaded vocab_embeddings: {data['vocab_embeddings'].shape}")
-    
+
     # ========== Load from result_dir ==========
     # Try to find result_dir if not specified
     if result_dir is None:
@@ -2385,65 +1339,65 @@ def load_model_data(model_dir, bow_dir=None, result_dir=None):
         possible_result_dir = model_dir.parent
         if possible_result_dir.exists():
             result_dir = possible_result_dir
-    
+
     if result_dir and Path(result_dir).exists():
         result_dir = Path(result_dir)
-        
+
         # Load timestamps
         ts_file = result_dir / 'timestamps.npy'
         if ts_file.exists():
             data['timestamps'] = np.load(ts_file, allow_pickle=True)
             print(f"  Loaded timestamps: {len(data['timestamps'])} dates")
-    
+
     # ========== Fallback for vocab ==========
     # If vocab not loaded from bow_dir, generate placeholder
     if 'vocab' not in data and 'beta' in data:
         data['vocab'] = [f"word_{i}" for i in range(data['beta'].shape[1])]
         print(f"  Generated placeholder vocab: {len(data['vocab'])} words")
-    
+
     return data
 
 
 def load_complete_data(dataset_dir):
     """
     Load complete data from a dataset directory structure.
-    
+
     Expected structure:
         dataset_dir/
         ├── model/          # theta, beta, topic_words, config, etc.
         ├── bow/            # bow_matrix.npz, vocab.txt
         ├── evaluation/     # metrics.json
         └── timestamps.npy  # (optional)
-    
+
     Args:
         dataset_dir: Path to dataset directory (e.g., real_data/hatespeech_supervised)
                      or mode directory (e.g., result/hatespeech/supervised)
-    
+
     Returns:
         dict with all available data
     """
     from scipy import sparse
-    
+
     dataset_dir = Path(dataset_dir)
     data = {}
-    
+
     print(f"\nLoading data from: {dataset_dir}")
-    
+
     # Determine directory structure
     model_dir = dataset_dir / 'model'
     bow_dir = dataset_dir / 'bow'
     evaluation_dir = dataset_dir / 'evaluation'
-    
+
     # If model_dir doesn't exist, check if this is already the model dir
     if not model_dir.exists() and (dataset_dir / 'theta_*.npy').exists():
         model_dir = dataset_dir
         bow_dir = dataset_dir.parent / 'bow'
-    
+
     # Load model data
     if model_dir.exists():
         model_data = load_model_data(model_dir, bow_dir, dataset_dir)
         data.update(model_data)
-    
+
     # Load evaluation metrics
     if evaluation_dir.exists():
         metrics_files = list(evaluation_dir.glob('metrics_*.json'))
@@ -2452,7 +1406,7 @@ def load_complete_data(dataset_dir):
             with open(latest_metrics, 'r', encoding='utf-8') as f:
                 data['metrics'] = json.load(f)
             print(f"  Loaded metrics")
-    
+
     # Summary
     print(f"\nData loaded:")
     for key in data:
@@ -2464,7 +1418,7 @@ def load_complete_data(dataset_dir):
             print(f"  {key}: {data[key].shape}")
         else:
             print(f"  {key}: loaded")
-    
+
     return data
 
 
@@ -2475,9 +1429,9 @@ if __name__ == "__main__":
     print("""
     # Method 1: Load from model directory only (basic)
     from visualization_generator import VisualizationGenerator, load_model_data
-    
+
     data = load_model_data('/path/to/model')
-    
+
     generator = VisualizationGenerator(
         theta=data['theta'],
         beta=data['beta'],
@@ -2488,14 +1442,14 @@ if __name__ == "__main__":
         dpi=600
     )
     generator.generate_all()
-    
+
     # Method 2: Load complete data (recommended)
     from visualization_generator import VisualizationGenerator, load_complete_data
-    
+
     # This loads: theta, beta, vocab, topic_words, topic_embeddings,
     #             bow_matrix, timestamps, training_history, metrics
     data = load_complete_data('/path/to/dataset')
-    
+
     generator = VisualizationGenerator(
         theta=data['theta'],
         beta=data['beta'],
@@ -2512,7 +1466,7 @@ if __name__ == "__main__":
         dpi=600
     )
     generator.generate_all()
-    
+
     # Available Charts:
     # ================
     # Basic Global (always available):

@@ -236,7 +236,7 @@ class BERTopicModel(TraditionalTopicModel):
         
         topics, probs = self.model.transform(texts, embeddings=embeddings)
         
-        if probs is None:
+        if probs is None or np.asarray(probs).ndim == 1:
             # If probabilities not available, create one-hot encoding
             num_docs = len(texts)
             num_topics = self.num_topics
@@ -252,9 +252,13 @@ class BERTopicModel(TraditionalTopicModel):
         if texts is not None:
             return self.transform(texts)
         
-        if self._probs is None:
-            raise ValueError("No probabilities available. Fit model first.")
-        
+        if self._topics is None:
+            raise ValueError('Model not fitted. Call fit() first.')
+        if self._probs is None or np.asarray(self._probs).ndim == 1:
+            theta = np.zeros((len(self._topics), self.num_topics))
+            for i, topic in enumerate(self._topics):
+                if 0 <= topic < self.num_topics: theta[i, topic] = 1.0
+            return theta
         return self._probs
     
     def get_beta(self) -> np.ndarray:
@@ -267,35 +271,36 @@ class BERTopicModel(TraditionalTopicModel):
         if self.model is None:
             raise ValueError("Model not fitted. Call fit() first.")
         
-        # Get all topics (excluding -1)
         topics = self.model.get_topics()
-        
-        # Build vocabulary from all topic words
-        all_words = set()
-        for topic_id, words in topics.items():
-            if topic_id != -1:
-                for word, _ in words:
-                    all_words.add(word)
-        
-        vocab = sorted(list(all_words))
-        word_to_idx = {w: i for i, w in enumerate(vocab)}
-        
-        # Build beta matrix
-        num_topics = len([t for t in topics.keys() if t != -1])
-        vocab_size = len(vocab)
-        beta = np.zeros((num_topics, vocab_size))
-        
-        for topic_id, words in topics.items():
-            if topic_id != -1 and topic_id < num_topics:
-                for word, score in words:
-                    if word in word_to_idx:
-                        beta[topic_id, word_to_idx[word]] = max(0, score)
-        
-        # Normalize
-        row_sums = beta.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        beta = beta / row_sums
-        
+        topic_ids = sorted(t for t in topics if t != -1)
+        if topic_ids != list(range(len(topic_ids))):
+            raise ValueError('BERTopic topic IDs are not aligned to theta columns')
+        vectorizer = self.model.vectorizer_model
+        features = vectorizer.get_feature_names_out()
+        real_words = set(features)
+        weights = {}
+        for topic_id in topic_ids:
+            words = [(word, float(score)) for word, score in topics[topic_id]
+                     if isinstance(word, str) and word.strip() and word in real_words
+                     and np.isfinite(score) and score > 0]
+            if not words:
+                # BERTopic pads empty top-word lists. Use real fitted weights, never that padding.
+                row = self.model.c_tf_idf_.getrow(sorted(topics).index(topic_id))
+                words = [(str(features[i]), float(score)) for i, score in zip(row.indices, row.data)
+                         if str(features[i]).strip() and np.isfinite(score) and score > 0]
+            if not words:
+                raise ValueError(f'BERTopic topic {topic_id} has no valid word evidence; review tokenization/vectorizer parameters')
+            weights[topic_id] = words
+        vocab = sorted({word for words in weights.values() for word, _ in words})
+        self._beta_vocab = vocab
+        word_to_idx = {word: i for i, word in enumerate(vocab)}
+        beta = np.zeros((len(topic_ids), len(vocab)))
+        for topic_id, words in weights.items():
+            for word, score in words:
+                beta[topic_id, word_to_idx[word]] = score
+        if not beta.size:
+            raise ValueError('BERTopic found no non-outlier topics with word evidence')
+        beta /= beta.sum(axis=1, keepdims=True)
         return beta
     
     def get_topics(self) -> List[int]:

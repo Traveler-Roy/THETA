@@ -23,6 +23,7 @@ warnings.filterwarnings('ignore')
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from visualization.publication import COLORS, save_figure, setup_style, validate_export, export_manifest
 
 
 def find_latest_file(directory, pattern, fixed_name=None):
@@ -51,6 +52,20 @@ def find_latest_file(directory, pattern, fixed_name=None):
     if not files:
         return None
     return max(files, key=os.path.getmtime)
+
+
+def resolve_theta_data_dir(exp_dir, mode):
+    """Resolve the exact preparation experiment recorded by the existing training config."""
+    exp_dir = Path(exp_dir)
+    for file in [exp_dir / f'config_{mode}.json', exp_dir / 'config.json']:
+        if file.is_file():
+            config = json.loads(file.read_text(encoding='utf-8'))
+            name = config.get('data_exp')
+            if name:
+                if Path(name).name != name or name in {'.', '..'}:
+                    raise ValueError('Invalid preparation experiment identifier')
+                return exp_dir.parent / name / 'data'
+    return exp_dir / 'data'
 
 
 def load_visualization_data(
@@ -126,7 +141,7 @@ def load_visualization_data(
         
         if exp_dir and exp_dir.exists():
             model_dir = exp_dir / 'theta'  # result/{dataset}/{model_size}/theta/exp_*/theta/
-            bow_dir = exp_dir / 'data' / 'bow'  # result/{dataset}/{model_size}/theta/exp_*/data/bow/
+            bow_dir = resolve_theta_data_dir(exp_dir, mode) / 'bow'  # result/{dataset}/{model_size}/theta/exp_*/data/bow/
             evaluation_dir = exp_dir
             topic_words_dir = model_dir  # topic_words.json is in model_dir
     
@@ -313,37 +328,28 @@ def load_visualization_data(
                 data['metrics'] = json.load(f)
             print(f"✓ Loaded model info as metrics")
     
-    # Load vocab
-    if bow_dir and bow_dir.exists():
-        vocab_file = bow_dir / 'vocab.txt'
-        vocab_json = bow_dir / 'vocab.json'
-        if vocab_file.exists():
-            with open(vocab_file, 'r', encoding='utf-8') as f:
-                data['vocab'] = [line.strip() for line in f.readlines()]
-            print(f"✓ Loaded vocab: {len(data['vocab'])} words")
-        elif vocab_json.exists():
-            with open(vocab_json, 'r', encoding='utf-8') as f:
-                data['vocab'] = json.load(f)
-            print(f"✓ Loaded vocab from JSON: {len(data['vocab'])} words")
-        else:
-            # Generate placeholder vocab
-            data['vocab'] = [f"word_{i}" for i in range(data['beta'].shape[1])]
-            print(f"⚠ Generated placeholder vocab: {len(data['vocab'])} words")
-    else:
-        data['vocab'] = [f"word_{i}" for i in range(data['beta'].shape[1])]
-        print(f"⚠ Generated placeholder vocab: {len(data['vocab'])} words")
-    
+    # Use only persisted vocabulary; fabricated word_N labels cannot support interpretation.
+    vocab_paths = [model_dir / 'vocab.json'] + ([bow_dir / 'vocab.txt', bow_dir / 'vocab.json'] if bow_dir else [])
+    vocab_path = next((file for file in vocab_paths if file.is_file()), None)
+    if vocab_path is None: raise ValueError('Training vocabulary is unavailable')
+    data['vocab'] = json.loads(vocab_path.read_text(encoding='utf-8')) if vocab_path.suffix == '.json' else vocab_path.read_text(encoding='utf-8').splitlines()
+    from artifact_utils import validate_topic_matrices
+    validate_topic_matrices(data['theta'], data['beta'], data['vocab'], model_type)
+    data['topic_words'] = [(i, [(data['vocab'][j], float(data['beta'][i,j])) for j in np.argsort(-data['beta'][i])[:20]]) for i in range(data['beta'].shape[0])]
+
     # Load BOW matrix (optional)
     if bow_dir:
         bow_file = bow_dir / 'bow_matrix.npy'
-        if bow_file.exists():
+        if (bow_dir / 'bow_matrix.npz').is_file():
+            data['bow_matrix'] = sparse.load_npz(bow_dir / 'bow_matrix.npz')
+        elif bow_file.exists():
             data['bow_matrix'] = np.load(bow_file)
             print(f"✓ Loaded bow_matrix: {data['bow_matrix'].shape}")
     
     # Load timestamps (optional) - check in model_dir parent or evaluation_dir
     ts_file = model_dir.parent / 'timestamps.npy' if model_dir else None
     if ts_file and ts_file.exists():
-        data['timestamps'] = np.load(ts_file, allow_pickle=True)
+        data['timestamps'] = np.load(ts_file, allow_pickle=False).astype('datetime64[ms]').astype(object)
         print(f"✓ Loaded timestamps: {len(data['timestamps'])}")
     
     # Load config
@@ -368,7 +374,9 @@ def run_all_visualizations(
     dpi=300,
     model_type='theta',
     num_topics=None,
-    model_exp=None
+    model_exp=None,
+    data=None,
+    formats=('png', 'pdf', 'svg')
 ):
     """
     Run all visualizations for ETM/Baseline results.
@@ -388,14 +396,16 @@ def run_all_visualizations(
     Returns:
         Path to output directory
     """
-    # Load data with model type awareness
-    data = load_visualization_data(
-        result_dir, dataset, mode, 
-        model_size=model_size, 
-        model_exp=model_exp,
-        model_type=model_type, 
-        num_topics=num_topics
-    )
+    formats = validate_export(dpi, formats)
+    if data is None:
+        # Load data with model type awareness
+        data = load_visualization_data(
+            result_dir, dataset, mode,
+            model_size=model_size,
+            model_exp=model_exp,
+            model_type=model_type,
+            num_topics=num_topics
+        )
     
     is_theta = model_type == 'theta'
     
@@ -435,128 +445,26 @@ def run_all_visualizations(
         topic_words=data['topic_words'],
         topic_embeddings=data.get('topic_embeddings'),
         timestamps=data.get('timestamps'),
+        dimension_values=data.get('dimension_values'),
         bow_matrix=data.get('bow_matrix'),
         training_history=data.get('training_history'),
+        beta_over_time=data.get('beta_over_time'), time_slices_info=data.get('time_slices_info'),
         metrics=data.get('metrics'),
         output_dir=str(output_dir),
         language=language,
-        dpi=dpi
+        dpi=dpi, formats=formats
     )
     
     # Generate all visualizations
     generator.generate_all()
     
-    # Also run topic visualizer for additional charts
-    try:
-        from visualization.topic_visualizer import TopicVisualizer
-        
-        print(f"\n[Additional Visualizations]")
-        
-        viz = TopicVisualizer(output_dir=str(output_dir / 'global'), dpi=dpi, language=language)
-        
-        # Topic word bars (split into individual per-topic charts)
-        viz.visualize_topic_words(
-            data['topic_words'],
-            num_words=10
-        )
-        print(f"  ✓ Per-topic word distribution charts generated")
-        
-        # Topic similarity heatmap
-        topic_sim_filename = '主题相似度.png' if language == 'zh' else 'topic_similarity.png'
-        viz.visualize_topic_similarity(
-            data['beta'],
-            data['topic_words'],
-            filename=topic_sim_filename
-        )
-        print(f"  ✓ {topic_sim_filename}")
-        
-        # Document-topic distribution
-        doc_topic_filename = '文档主题分布_UMAP.png' if language == 'zh' else 'doc_topic_umap.png'
-        viz.visualize_document_topics(
-            data['theta'],
-            method='umap',
-            max_docs=5000,
-            filename=doc_topic_filename
-        )
-        print(f"  ✓ {doc_topic_filename}")
-        
-        # Training history composite chart removed (single charts already generated by generator)
+    _run_additional_visualizations(data, output_dir, language, dpi, formats, model_type)
 
-        # Metrics
-        if data.get('metrics'):
-            viz.visualize_metrics(
-                data['metrics'],
-                filename='metrics.png'
-            )
-            print(f"  ✓ metrics.png")
-        
-        # Word clouds (if wordcloud package available)
-        try:
-            viz.visualize_all_wordclouds(
-                data['topic_words'],
-                num_words=30,
-                filename='topic_wordclouds.png'
-            )
-            print(f"  ✓ topic_wordclouds.png")
-        except Exception as e:
-            print(f"  ⚠ topic_wordclouds skipped: {e}")
-        
-        # pyLDAvis-style visualization (split into two separate charts)
-        try:
-            viz.visualize_intertopic_distance(
-                data['theta'],
-                data['beta']
-            )
-            print(f"  ✓ Intertopic Distance Map generated")
-        except Exception as e:
-            print(f"  ⚠ intertopic_distance skipped: {e}")
-        
-        try:
-            viz.visualize_topic_word_frequency(
-                data['beta'],
-                data['topic_words'],
-                selected_topic=0,
-                n_words=30
-            )
-            print(f"  ✓ Top Salient Terms chart generated")
-        except Exception as e:
-            print(f"  ⚠ topic_word_frequency skipped: {e}")
-        
-        # pyLDAvis-style combined visualization
-        try:
-            if data.get('bow_matrix') is not None:
-                pyldavis_filename = 'pyLDAvis风格图.png' if language == 'zh' else 'pyldavis_style.png'
-                viz.visualize_pyldavis_style(
-                    data['theta'],
-                    data['beta'],
-                    data['bow_matrix'],
-                    data['vocab'],
-                    filename=pyldavis_filename
-                )
-                print(f"  ✓ {pyldavis_filename}")
-        except Exception as e:
-            print(f"  ⚠ pyldavis_style skipped: {e}")
-        
-        # Also generate interactive HTML version if pyLDAvis is available
-        try:
-            from visualization.topic_visualizer import generate_pyldavis_visualization
-            html_path = generate_pyldavis_visualization(
-                theta=data['theta'],
-                beta=data['beta'],
-                bow_matrix=data.get('bow_matrix'),
-                vocab=data['vocab'],
-                output_path=str(output_dir / 'global' / 'pyldavis_interactive.html')
-            )
-            if html_path:
-                print(f"  ✓ pyldavis_interactive.html")
-        except Exception as e:
-            print(f"  ⚠ pyldavis_interactive.html skipped: {e}")
-        
-    except Exception as e:
-        print(f"  ⚠ Additional visualizations error: {e}")
-    
     # Generate summary report
     generate_summary_report(data, output_dir)
+    export_manifest(output_dir, dpi, formats, data=data)
+    if data.get('source_metadata'):
+        (Path(output_dir) / 'source-metadata.json').write_text(json.dumps(data['source_metadata'], ensure_ascii=False, indent=2))
     
     print(f"\n{'='*60}")
     print(f"Visualization complete!")
@@ -566,12 +474,73 @@ def run_all_visualizations(
     return output_dir
 
 
+def _run_additional_visualizations(data, output_dir, language, dpi, formats, model):
+    """One native rendering path, with a durable outcome for every attempted chart."""
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from visualization.topic_visualizer import TopicVisualizer, generate_pyldavis_visualization
+    root = Path(output_dir)
+    global_dir = root / 'global'
+    viz = TopicVisualizer(output_dir=str(global_dir), dpi=dpi, formats=formats, language=language)
+    zh = language == 'zh'
+    statuses = []
+
+    def render(name, function, reason=None):
+        if reason:
+            statuses.append({'chart': name, 'status': 'skipped', 'detail': reason, 'files': []})
+            return
+        before = {p: p.stat().st_mtime_ns for p in root.rglob('*') if p.is_file()}
+        capture = StringIO()
+        error = None
+        try:
+            with redirect_stdout(capture): function()
+            if '⚠' in capture.getvalue():
+                error = capture.getvalue().strip()
+        except Exception as exc:
+            error = str(exc)
+        files = [str(p.relative_to(root)) for p in root.rglob('*')
+                 if p.is_file() and p.stat().st_mtime_ns != before.get(p)]
+        statuses.append({'chart': name, 'status': 'failed' if error else ('generated' if files else 'skipped'),
+                         'detail': error or capture.getvalue().strip() or ('No artifacts returned' if not files else ''),
+                         'files': sorted(files)})
+        print(f"  [{statuses[-1]['status']}] {name}" + (f': {error}' if error else ''))
+
+    render('topic_words', lambda: viz.visualize_topic_words(data['topic_words'], num_words=10))
+    render('topic_similarity', lambda: viz.visualize_topic_similarity(data['beta'], data['topic_words'],
+        filename='主题相似度图.png' if zh else 'topic_similarity.png'))
+    render('document_projection', lambda: viz.visualize_document_topics(data['theta'], labels=data.get('document_topics'),
+        max_docs=5000, filename='文档主题UMAP图.png' if zh else 'doc_topic_umap.png'))
+    render('wordclouds', lambda: viz.visualize_all_wordclouds(data['topic_words'], num_words=30))
+    grid_words=[(i,[(data['vocab'][j],float(row[j])) for j in np.argsort(-row)[:80]
+                     if np.isfinite(row[j]) and row[j]>0]) for i,row in enumerate(data['beta'])]
+    render('wordcloud_grid', lambda: viz.visualize_wordcloud_grid(grid_words))
+    generative = model not in {'nvdm', 'bertopic', 'dtm'}
+    reason = None if generative else f'{model}: latent coordinates, c-TF-IDF or time-varying beta do not support this probability view'
+    render('intertopic_distance', lambda: viz.visualize_intertopic_distance(data['theta'], data['beta']), reason)
+    render('word_weights', lambda: viz.visualize_topic_word_frequency(data['beta'], data['topic_words']), reason)
+    render('pyldavis', lambda: generate_pyldavis_visualization(theta=data['theta'], beta=data['beta'],
+        bow_matrix=data.get('bow_matrix'), vocab=data['vocab'],
+        output_path=str(global_dir / ('交互式主题可视化.html' if zh else 'pyldavis_interactive.html'))),
+        reason or ('Interactive topic comparison requires at least two topics' if data['beta'].shape[0] < 2 else
+                   'No observed BOW counts available' if data.get('bow_matrix') is None else None))
+    if model == 'stm':
+        render('stm_covariates', lambda: _run_stm_specific_visualizations(data, root, language, dpi, formats),
+               'Covariates not exported' if data.get('covariates') is None else None)
+    if model == 'dtm':
+        render('dtm_word_evolution', lambda: _run_dtm_specific_visualizations(data, root, language, dpi, formats),
+               'Time-specific beta not exported' if data.get('beta_over_time') is None else None)
+    (root / 'additional-chart-status.json').write_text(json.dumps(statuses, ensure_ascii=False, indent=2))
+    if any(item['status'] == 'failed' for item in statuses):
+        export_manifest(root, dpi, formats, data)
+        raise ValueError(f'Native chart export failed; inspect {root / "additional-chart-status.json"}')
+
+
 def generate_summary_report(data, output_dir):
     """Generate a summary report of the visualization."""
     output_dir = Path(output_dir)
     
     report = []
-    report.append("# ETM Visualization Summary Report")
+    report.append("# THETA Topic Model Visualization Report")
     report.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report.append("")
     
@@ -592,7 +561,8 @@ def generate_summary_report(data, output_dir):
         top_words = [w[0] for w in words[:10]]
         strength = data['theta'][:, topic_id].mean()
         report.append(f"### Topic {topic_id + 1}")
-        report.append(f"- **Strength**: {strength:.6f}")
+        label = "Mean latent coordinate (not probability)" if data.get("theta_semantics") == "latent_coordinates" else "Strength"
+        report.append(f"- **{label}**: {strength:.6f}")
         report.append(f"- **Top words**: {', '.join(top_words)}")
         report.append("")
     
@@ -635,7 +605,7 @@ def generate_summary_report(data, output_dir):
     report.append("")
     
     report.append("### Per-Topic Charts")
-    topics_dir = output_dir / 'topics'
+    topics_dir = output_dir / 'topic'
     if topics_dir.exists():
         topic_dirs = sorted(topics_dir.glob('topic_*'))
         if topic_dirs:
@@ -650,7 +620,7 @@ def generate_summary_report(data, output_dir):
     print(f"  ✓ README.md (summary report)")
 
 
-def load_baseline_data(result_dir, dataset, model, num_topics=20):
+def load_baseline_data(result_dir, dataset, model, num_topics=20, workspace_dir=None):
     """
     Load baseline model data (LDA, ETM, CTM) for visualization.
     
@@ -693,7 +663,7 @@ def load_baseline_data(result_dir, dataset, model, num_topics=20):
     
     # New structure: result_dir is the task directory (e.g., .../ctm/bilingual_test/)
     # Model files are directly in result_dir or in model-specific subdirs (e.g., ctm_zeroshot/)
-    if result_dir.name.startswith('exp_') or (result_dir / 'config.json').exists():
+    if result_dir.name.startswith('exp_') or (result_dir / 'config.json').exists() or any(result_dir.glob('theta*.npy')):
         # result_dir is the task/experiment directory
         model_dir = result_dir
         dataset_dir = result_dir
@@ -719,181 +689,77 @@ def load_baseline_data(result_dir, dataset, model, num_topics=20):
     
     data = {}
     
-    # Load theta from various possible subdirectories
-    theta_path = None
-    beta_path = None
-    
-    # Check paths in priority order
-    possible_paths = [
-        model_dir / 'model' / f'theta_k{num_topics}.npy',  # HDP/neural
-        model_dir / f'theta_k{num_topics}.npy',  # direct
-        model_dir / model / f'theta_k{num_topics}.npy',  # model subdir
-        model_dir / model / 'model' / f'theta_k{num_topics}.npy',  # model/model subdir
-    ]
-    
-    # CTM saves to ctm_zeroshot/ or ctm_combined/
-    if model == 'ctm':
-        possible_paths.insert(0, model_dir / 'ctm_zeroshot' / f'theta_k{num_topics}.npy')
-        possible_paths.insert(1, model_dir / 'ctm_combined' / f'theta_k{num_topics}.npy')
-    
-    for p in possible_paths:
-        if p.exists():
-            theta_path = p
-            beta_path = p.parent / f'beta_k{num_topics}.npy'
-            break
-    
-    if theta_path and theta_path.exists():
-        data['theta'] = np.load(theta_path)
-        print(f"✓ Loaded theta: {data['theta'].shape}")
-    else:
-        raise FileNotFoundError(f"theta not found in any of: {[str(p) for p in possible_paths]}")
-    
-    if beta_path and beta_path.exists():
-        data['beta'] = np.load(beta_path)
-        print(f"✓ Loaded beta: {data['beta'].shape}")
-    else:
-        raise FileNotFoundError(f"beta not found: {beta_path}")
-    
-    # Load vocab - try multiple locations
-    vocab_path = None
-    # 1. Try data_exp_dir first (new structure)
-    if data_exp_dir and (data_exp_dir / 'vocab.json').exists():
-        vocab_path = data_exp_dir / 'vocab.json'
-    # 2. Try model_dir / bow / vocab.json (old structure)
-    elif (model_dir / 'bow' / 'vocab.json').exists():
-        vocab_path = model_dir / 'bow' / 'vocab.json'
-    # 3. Try dataset_dir / vocab.json
-    elif (dataset_dir / 'vocab.json').exists():
-        vocab_path = dataset_dir / 'vocab.json'
-    
-    if vocab_path and vocab_path.exists():
-        with open(vocab_path, 'r', encoding='utf-8') as f:
-            data['vocab'] = json.load(f)
-        print(f"✓ Loaded vocab: {len(data['vocab'])} words")
-    else:
-        data['vocab'] = [f"word_{i}" for i in range(data['beta'].shape[1])]
-        print(f"⚠ Generated placeholder vocab: {len(data['vocab'])} words")
-    
-    # Load topic_words from topicwords/ subdirectory
-    topic_words_path = model_dir / 'topicwords' / f'topic_words_k{num_topics}.json'
-    if not topic_words_path.exists():
-        topic_words_path = model_dir / f'topic_words_k{num_topics}.json'
-    if topic_words_path.exists():
-        with open(topic_words_path, 'r', encoding='utf-8') as f:
-            topic_words_raw = json.load(f)
-        
-        topic_words = []
-        if isinstance(topic_words_raw, dict):
-            # Format: {"topic_0": ["word1", ...], ...}
-            sorted_items = sorted(topic_words_raw.items(), 
-                                 key=lambda x: int(x[0].replace('topic_', '')) if 'topic_' in x[0] else int(x[0]))
-            for key, words in sorted_items:
-                topic_id = int(key.replace('topic_', '')) if 'topic_' in key else int(key)
-                if isinstance(words, list) and len(words) > 0 and isinstance(words[0], str):
-                    word_weights = []
-                    for w in words:
-                        idx = data['vocab'].index(w) if w in data['vocab'] else -1
-                        # Check if idx is within beta bounds (for BERTopic which may have smaller beta)
-                        if idx >= 0 and topic_id < data['beta'].shape[0] and idx < data['beta'].shape[1]:
-                            weight = float(data['beta'][topic_id, idx])
-                        else:
-                            weight = 0.01
-                        word_weights.append((w, weight))
-                    topic_words.append((topic_id, word_weights))
-                else:
-                    topic_words.append((topic_id, []))
-        else:
-            # Generate from beta
-            for i in range(data['beta'].shape[0]):
-                top_indices = np.argsort(-data['beta'][i])[:20]
-                words = [(data['vocab'][idx], float(data['beta'][i, idx])) for idx in top_indices]
-                topic_words.append((i, words))
-        
-        data['topic_words'] = topic_words
-        print(f"✓ Loaded topic_words: {len(data['topic_words'])} topics")
-    else:
-        # Generate from beta
-        topic_words = []
-        for i in range(data['beta'].shape[0]):
-            top_indices = np.argsort(-data['beta'][i])[:20]
-            words = [(data['vocab'][idx], float(data['beta'][i, idx])) for idx in top_indices]
-            topic_words.append((i, words))
-        data['topic_words'] = topic_words
-        print(f"⚠ Generated topic_words from beta")
-    
-    # Load BOW matrix - try multiple locations
-    bow_path = None
-    # 1. Try data_exp_dir first (new structure)
-    if data_exp_dir and (data_exp_dir / 'bow_matrix.npy').exists():
-        bow_path = data_exp_dir / 'bow_matrix.npy'
-    # 2. Try model_dir / bow / bow_matrix.npy (old structure)
-    elif (model_dir / 'bow' / 'bow_matrix.npy').exists():
-        bow_path = model_dir / 'bow' / 'bow_matrix.npy'
-    # 3. Try dataset_dir / bow_matrix.npy
-    elif (dataset_dir / 'bow_matrix.npy').exists():
-        bow_path = dataset_dir / 'bow_matrix.npy'
-    
-    if bow_path and bow_path.exists():
-        data['bow_matrix'] = np.load(bow_path)
-        print(f"✓ Loaded bow_matrix: {data['bow_matrix'].shape}")
-    
-    # Load metrics - try multiple locations
-    metrics_path = None
-    # 1. Try result_dir (experiment directory) first
-    if (result_dir / f'metrics_k{num_topics}.json').exists():
-        metrics_path = result_dir / f'metrics_k{num_topics}.json'
-    # 2. Try model_dir / evaluation / metrics_k{num_topics}.json
-    elif (model_dir / 'evaluation' / f'metrics_k{num_topics}.json').exists():
-        metrics_path = model_dir / 'evaluation' / f'metrics_k{num_topics}.json'
-    # 3. Try model_dir / metrics_k{num_topics}.json
-    elif (model_dir / f'metrics_k{num_topics}.json').exists():
-        metrics_path = model_dir / f'metrics_k{num_topics}.json'
-    
-    if metrics_path and metrics_path.exists():
-        with open(metrics_path, 'r', encoding='utf-8') as f:
-            data['metrics'] = json.load(f)
-        print(f"✓ Loaded metrics from {metrics_path.name}")
-    
-    # Load timestamps for DTM (time_slices.json and time_indices.npy)
-    data['topic_embeddings'] = None
-    data['training_history'] = None
+    from artifact_utils import find_topic_matrix_pair, validate_topic_matrices
+    theta_path, beta_path = find_topic_matrix_pair(model_dir, num_topics)
+    data['theta'] = np.load(theta_path, allow_pickle=False)
+    data['beta'] = np.load(beta_path, allow_pickle=False)
+    num_topics = data['theta'].shape[1]
+    matrix_dir = theta_path.parent
+    data['matrix_dir'] = matrix_dir
+    data['model_type'] = model
+    print(f"✓ Loaded original theta {data['theta'].shape}, beta {data['beta'].shape}")
+
+    # The worker uses an explicit preprocessing workspace outside the result tree.
+    if workspace_dir is not None:
+        data_exp_dir = Path(workspace_dir)
+    vocab_paths = [matrix_dir / 'vocab.json', *([data_exp_dir / 'vocab.json'] if data_exp_dir else []), model_dir / 'bow/vocab.json', dataset_dir / 'vocab.json']
+    if model == 'bertopic': vocab_paths = [matrix_dir / 'vocab.json']
+    vocab_path = next((file for file in vocab_paths if file.is_file()), None)
+    if vocab_path is None:
+        raise ValueError('Actual model vocabulary unavailable; refusing placeholder or mismatched words')
+    data['vocab'] = json.loads(vocab_path.read_text(encoding='utf-8'))
+    validate_topic_matrices(data['theta'], data['beta'], data['vocab'], model)
+    def optional_file(name):
+        return next((directory / name for directory in [matrix_dir, model_dir / 'topicwords', model_dir, dataset_dir, data_exp_dir] if directory is not None and (directory / name).is_file()), matrix_dir / name)
+    data['topic_words'] = [
+        (i, [(data['vocab'][idx], float(data['beta'][i, idx])) for idx in np.argsort(-data['beta'][i])[:20]])
+        for i in range(data['beta'].shape[0])]
+
+    # Keep BOW aligned with this model's own vocabulary (BERTopic exports a different one).
+    bow_paths = [matrix_dir] if model == 'bertopic' else [matrix_dir, data_exp_dir, model_dir / 'bow', dataset_dir]
+    for directory in bow_paths:
+        if directory is None: continue
+        if (directory / 'bow_matrix.npz').is_file(): data['bow_matrix'] = sparse.load_npz(directory / 'bow_matrix.npz'); break
+        if (directory / 'bow_matrix.npy').is_file(): data['bow_matrix'] = np.load(directory / 'bow_matrix.npy', allow_pickle=False); break
+    if data.get('bow_matrix') is not None and data['bow_matrix'].shape != (data['theta'].shape[0], len(data['vocab'])):
+        raise ValueError('BOW rows/vocabulary are not aligned to the result matrices')
+    metrics_path = optional_file(f'metrics_k{num_topics}.json')
+    if not metrics_path.exists(): metrics_path = optional_file(f'evaluation/metrics_k{num_topics}.json')
+    if metrics_path.is_file(): data['metrics'] = json.loads(metrics_path.read_text())
+    history_path = optional_file(f'training_history_k{num_topics}.json')
+    if not history_path.exists(): history_path = optional_file('training_history.json')
+    data['training_history'] = json.loads(history_path.read_text()) if history_path.is_file() else None
     data['timestamps'] = None
-    
-    # Try to load timestamp data (required for DTM)
-    time_slices_path = dataset_dir / 'time_slices.json'
-    time_indices_path = dataset_dir / 'time_indices.npy'
-    
-    if time_slices_path.exists() and time_indices_path.exists():
-        with open(time_slices_path, 'r', encoding='utf-8') as f:
-            time_slices_info = json.load(f)
-        time_indices = np.load(time_indices_path)
-        
-        from datetime import datetime
-        unique_times = time_slices_info.get('unique_times', [])
-        
-        timestamps = []
-        for idx in time_indices:
-            if idx < len(unique_times):
-                year = unique_times[idx]
-                timestamps.append(datetime(year, 1, 1))
-            else:
-                timestamps.append(datetime(2020, 1, 1))
-        
-        data['timestamps'] = np.array(timestamps)
-        data['time_slices_info'] = time_slices_info
-        print(f"✓ Loaded timestamps: {len(data['timestamps'])} dates ({len(unique_times)} unique years)")
-    
-    training_history_path = model_dir / f'training_history_k{num_topics}.json'
-    if training_history_path.exists():
-        with open(training_history_path, 'r', encoding='utf-8') as f:
-            data['training_history'] = json.load(f)
-        print(f"✓ Loaded training_history")
+    data['topic_embeddings'] = None
+    for name in ['source_rows', 'document_topics']:
+        file = optional_file(name + '.npy')
+        if file.is_file(): data[name] = np.load(file, allow_pickle=False)
+    time_file, index_file = optional_file('time_slices.json'), optional_file('time_indices.npy')
+    if time_file.is_file() and index_file.is_file():
+        info = json.loads(time_file.read_text()); indices = np.load(index_file, allow_pickle=False)
+        years = info.get('unique_times', [])
+        if len(indices) != len(data['theta']) or (indices < 0).any() or (indices >= len(years)).any(): raise ValueError('Time indices do not align to theta')
+        data['timestamps'] = np.array([datetime(int(years[int(index)]), 1, 1) for index in indices])
+        data['time_slices_info'] = info
+    evolution_file = optional_file(f'beta_over_time_k{num_topics}.npy')
+    if evolution_file.is_file():
+        data['beta_over_time'] = np.load(evolution_file, allow_pickle=False)
+        if data['beta_over_time'].ndim != 3 or data['beta_over_time'].shape[1:] != data['beta'].shape or not np.isfinite(data['beta_over_time']).all(): raise ValueError('Invalid temporal beta axes or values')
+        if data.get('time_slices_info') and len(data['beta_over_time']) != len(data['time_slices_info']['unique_times']): raise ValueError('Temporal beta/time axes do not match')
+        data['plot_scope'] = 'DTM theta covers all modeled rows; static beta/keyword plots describe the last time slice. Temporal word plots use beta_over_time and the recorded periods.'
+    document_topics = data.get('document_topics')
+    if model == 'bertopic':
+        if document_topics is None or len(document_topics) != len(data['theta']):
+            raise ValueError('BERTopic 导出不完整：缺少或不匹配 document_topics.npy，无法确定离群点与文档主题分配；不能从软权重猜测真实聚类标签')
+        if any(not str(word).strip() for word in data['vocab']):
+            raise ValueError('BERTopic 词表含空白占位词，不能作为真实主题词生成图表')
+        data['theta_semantics'] = 'membership_mass_excluding_outliers'
+        data['beta_semantics'] = 'normalized_selected_ctfidf_weights'
 
     # Load STM covariate data
     if model == 'stm':
-        stm_model_dir = model_dir / 'stm' / 'model'
-        if not stm_model_dir.exists():
-            stm_model_dir = model_dir / 'model'
+        # Sidecars belong to the exact resolved theta/beta pair, including direct leaf paths.
+        stm_model_dir = matrix_dir
 
         covariate_info_path = stm_model_dir / f'covariate_info_k{num_topics}.json'
         if covariate_info_path.exists():
@@ -934,7 +800,7 @@ def load_baseline_data(result_dir, dataset, model, num_topics=20):
     return data
 
 
-def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
+def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300, formats=('png', 'pdf', 'svg')):
     """STM covariate visualizations: platform-topic association charts."""
     import matplotlib
     matplotlib.use('Agg')
@@ -947,6 +813,7 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
     global_dir = output_dir / 'global'
     global_dir.mkdir(parents=True, exist_ok=True)
 
+    setup_style(language)
     zh = (language == 'zh')
     theta = data.get('theta')
     covariates = data.get('covariates')
@@ -963,8 +830,14 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
     try:
         import pandas as pd
         from sklearn.preprocessing import LabelEncoder
+        source_frame = data.get('source_frame')
+        source_column = data.get('source_covariate_column')
+        if source_frame is not None and source_column in source_frame.columns:
+            le = LabelEncoder()
+            le.fit(source_frame[source_column].fillna('unknown').astype(str))
+            platform_labels = dict(enumerate(le.classes_))
         config_path = output_dir.parent / 'config.json'
-        if config_path.exists():
+        if not platform_labels and config_path.exists():
             with open(config_path) as f:
                 cfg = json.load(f)
             dataset = cfg.get('dataset', '')
@@ -980,6 +853,7 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
     except Exception:
         pass
 
+    platform_labels.update(data.get('covariate_value_labels', {}))
     unique_vals = sorted(set(covariates[:, 0].astype(int).tolist()))
     cov_labels = [platform_labels.get(v, f'cat_{v}') for v in unique_vals]
 
@@ -1000,34 +874,38 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
 
     # Chart 1: 协变量-主题关联热力图
     try:
-        fig, ax = plt.subplots(figsize=(max(10, K * 0.9), max(4, len(unique_vals) * 0.8)))
-        im = ax.imshow(mean_theta, aspect='auto', cmap='YlOrRd')
+        fig, ax = plt.subplots(figsize=(6.8, max(2.6, len(unique_vals) * .45)))
+        im = ax.imshow(mean_theta, aspect='auto', cmap='Blues',vmin=0)
         plt.colorbar(im, ax=ax, label='平均主题占比' if zh else 'Mean Topic Proportion')
-        ax.set_xticks(range(K)); ax.set_xticklabels(topic_labels, rotation=45, ha='right', fontsize=8)
+        ax.set_xticks(range(K)); ax.set_xticklabels([f'T{i+1}' for i in range(K)], rotation=0, fontsize=8)
         ax.set_yticks(range(len(unique_vals))); ax.set_yticklabels(cov_labels, fontsize=9)
         ax.set_title('协变量-主题关联热力图' if zh else 'Covariate-Topic Heatmap', fontsize=12, fontweight='bold')
         for i in range(len(unique_vals)):
             for j in range(K):
-                ax.text(j, i, f'{mean_theta[i,j]:.3f}', ha='center', va='center', fontsize=6,
-                        color='white' if mean_theta[i,j] > 0.15 else 'black')
+                ax.text(j, i, f'{mean_theta[i,j]:.1%}', ha='center', va='center', fontsize=6,
+                        color='white' if im.norm(mean_theta[i,j]) > .6 else '#202020')
         plt.tight_layout()
-        plt.savefig(global_dir / ('协变量主题关联热力图.png' if zh else 'covariate_topic_heatmap.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+        save_figure(plt.gcf(), global_dir / ('协变量主题关联热力图.png' if zh else 'covariate_topic_heatmap.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
         plt.close(); print(f"  ✓ 协变量主题关联热力图.png")
     except Exception as e:
         print(f"  ⚠ heatmap: {e}")
 
     # Chart 2: 各平台主题分布堆积图
     try:
-        colors = cm.tab10(np.linspace(0, 1, K))
-        fig, ax = plt.subplots(figsize=(max(8, len(unique_vals) * 1.5), 6))
+        colors = [COLORS[i % len(COLORS)] for i in range(K)]
+        fig, ax = plt.subplots(figsize=(6.5, max(2.5,len(unique_vals)*.5)))
         bottom = np.zeros(len(unique_vals))
         for k in range(K):
-            ax.bar(cov_labels, mean_theta[:, k], bottom=bottom, color=colors[k], label=topic_labels[k], alpha=0.85)
+            ax.barh(cov_labels, mean_theta[:, k], left=bottom, color=colors[k], label=topic_labels[k], height=.55, edgecolor='white',linewidth=.5)
+            for i,value in enumerate(mean_theta[:,k]):
+                if value>.08:ax.text(bottom[i]+value/2,i,f'{value:.0%}',ha='center',va='center',color='white',fontsize=8)
             bottom += mean_theta[:, k]
-        ax.set_title('各平台主题分布对比（堆积）' if zh else 'Topic Distribution by Platform', fontsize=12, fontweight='bold')
-        ax.legend(loc='upper right', bbox_to_anchor=(1.18, 1), fontsize=7)
-        plt.xticks(rotation=30, ha='right', fontsize=9); plt.tight_layout()
-        plt.savefig(global_dir / ('各平台主题分布堆积图.png' if zh else 'platform_topic_stacked.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+        ax.set_title('分组主题构成' if zh else 'Topic composition by group', fontsize=12, fontweight='bold')
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=7)
+        from matplotlib.ticker import PercentFormatter
+        ax.xaxis.set_major_formatter(PercentFormatter(1));ax.set_xlim(0,1)
+        plt.xticks(rotation=0, fontsize=8); plt.tight_layout()
+        save_figure(plt.gcf(), global_dir / ('各平台主题分布堆积图.png' if zh else 'platform_topic_stacked.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
         plt.close(); print(f"  ✓ 各平台主题分布堆积图.png")
     except Exception as e:
         print(f"  ⚠ stacked bar: {e}")
@@ -1036,61 +914,70 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
     try:
         deviation = mean_theta - theta.mean(axis=0)[np.newaxis, :]
         vmax = np.abs(deviation).max()
-        fig, ax = plt.subplots(figsize=(max(10, K * 0.9), max(4, len(unique_vals) * 0.8)))
+        fig, ax = plt.subplots(figsize=(6.8, max(2.6, len(unique_vals) * .45)))
         im = ax.imshow(deviation, aspect='auto', cmap='RdBu_r', vmin=-vmax, vmax=vmax)
         plt.colorbar(im, ax=ax, label='偏差（相对全局均值）' if zh else 'Deviation from Global Mean')
-        ax.set_xticks(range(K)); ax.set_xticklabels(topic_labels, rotation=45, ha='right', fontsize=8)
+        ax.set_xticks(range(K)); ax.set_xticklabels([f'T{i+1}' for i in range(K)], rotation=0, fontsize=8)
         ax.set_yticks(range(len(unique_vals))); ax.set_yticklabels(cov_labels, fontsize=9)
-        ax.set_title('平台主题偏好偏差图（红=高于均值，蓝=低于均值）' if zh else 'Platform Topic Deviation', fontsize=11, fontweight='bold')
+        ax.set_title('分组主题偏差（红=高于均值，蓝=低于均值）' if zh else 'Topic deviation by group', fontsize=11, fontweight='bold')
         for i in range(len(unique_vals)):
             for j in range(K):
-                ax.text(j, i, f'{deviation[i,j]:+.3f}', ha='center', va='center', fontsize=6, color='black')
+                ax.text(j, i, f'{deviation[i,j]:+.1%}', ha='center', va='center', fontsize=8, color='white' if vmax and abs(deviation[i,j])/vmax>.6 else '#202020')
         plt.tight_layout()
-        plt.savefig(global_dir / ('平台主题偏好偏差图.png' if zh else 'platform_topic_deviation.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+        save_figure(plt.gcf(), global_dir / ('平台主题偏好偏差图.png' if zh else 'platform_topic_deviation.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
         plt.close(); print(f"  ✓ 平台主题偏好偏差图.png")
     except Exception as e:
         print(f"  ⚠ deviation: {e}")
 
-    # Chart 4: 各平台主导主题 Top-5
+    # Chart 4: paginate groups instead of compressing an arbitrary number into one row.
     try:
-        colors_top = cm.tab10(np.linspace(0, 1, K))
-        fig, axes = plt.subplots(1, len(unique_vals), figsize=(len(unique_vals) * 3, 5), sharey=False)
-        if len(unique_vals) == 1: axes = [axes]
-        for ax, i in zip(axes, range(len(unique_vals))):
-            top5 = np.argsort(-mean_theta[i])[:5]
-            ax.barh(range(5), mean_theta[i, top5][::-1], color=[colors_top[j] for j in top5[::-1]], alpha=0.85)
-            ax.set_yticks(range(5)); ax.set_yticklabels([topic_labels[j] for j in top5[::-1]], fontsize=8)
-            ax.set_title(cov_labels[i], fontsize=9, fontweight='bold')
-        fig.suptitle('各平台 Top-5 主导主题' if zh else 'Top-5 Topics per Platform', fontsize=12, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(global_dir / ('各平台主导主题.png' if zh else 'platform_dominant_topics.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
-        plt.close(); print(f"  ✓ 各平台主导主题.png")
+        from matplotlib.ticker import PercentFormatter
+        for start in range(0,len(unique_vals),6):
+            group_ids=list(range(start,min(start+6,len(unique_vals))))
+            cols=min(3,len(group_ids));rows=(len(group_ids)+cols-1)//cols
+            fig,axes=plt.subplots(rows,cols,figsize=(7.15,rows*2.3+.4),sharex=True,squeeze=False,layout='constrained')
+            for ax,i in zip(axes.flat,group_ids):
+                top5=np.argsort(-mean_theta[i])[:5][::-1]
+                ax.barh(range(len(top5)),mean_theta[i,top5],color=[COLORS[j%len(COLORS)] for j in top5],height=.55)
+                ax.set_xlim(0,max(mean_theta.max()*1.12,.01));ax.xaxis.set_major_formatter(PercentFormatter(1,decimals=0))
+                ax.set_yticks(range(len(top5)),[topic_labels[j] for j in top5],fontsize=7)
+                ax.set_title(cov_labels[i],fontsize=9);ax.set_xlabel('平均权重' if zh else 'Mean weight')
+            for ax in list(axes.flat)[len(group_ids):]:ax.set_visible(False)
+            fig.suptitle(('分组 Top-5 主题' if zh else 'Top-5 topics by group')+
+                         f' · {start+1}–{start+len(group_ids)}',fontsize=10)
+            stem='各平台主导主题' if zh else 'platform_dominant_topics'
+            filename=stem+(f'_{start//6+1}' if start else '')+'.png'
+            save_figure(fig,global_dir/filename,dpi=dpi,formats=formats);plt.close(fig)
     except Exception as e:
-        print(f"  ⚠ dominant topics: {e}")
+        print(f'  ⚠ dominant topics: {e}')
 
     # Chart 5: Gamma 系数图（若已保存）
     Gamma = data.get('Gamma')
     if Gamma is not None:
         try:
             n_cov = Gamma.shape[0] - 1
-            fig, axes = plt.subplots(1, max(1, n_cov), figsize=(max(8, K * 0.7) * n_cov, 5))
-            if n_cov == 1: axes = [axes]
+            fig, axes = plt.subplots(1, max(1,n_cov),figsize=(7.1,max(2.5,(K-1)*.28)),squeeze=False,layout='constrained')
+            axes=axes.ravel()
             for c in range(n_cov):
                 ax = axes[c]
                 coefs = Gamma[c + 1, :]
                 cname = covariate_names[c] if c < len(covariate_names) else f'cov_{c}'
-                ax.bar(range(K - 1), coefs, color=['#d62728' if v > 0 else '#1f77b4' for v in coefs], alpha=0.8)
-                ax.axhline(0, color='black', linewidth=0.8)
-                ax.set_xticks(range(K - 1)); ax.set_xticklabels([f'T{i+1}' for i in range(K - 1)], rotation=45, fontsize=8)
+                ax.barh(range(K-1),coefs,color=[COLORS[1] if v>0 else COLORS[0] for v in coefs],height=.55)
+                ax.axvline(0,color='#727B82',linewidth=.8)
+                ax.set_yticks(range(K-1),[f'T{i+1}' for i in range(K-1)]);ax.invert_yaxis()
+                ax.set_xlabel(('系数；参照主题 ' if zh else 'Coefficient; reference topic ')+f'T{K}')
                 ax.set_title(f'协变量效应：{cname}' if zh else f'Covariate Effect: {cname}', fontsize=10, fontweight='bold')
                 ax.grid(axis='y', alpha=0.3)
             plt.tight_layout()
-            plt.savefig(global_dir / ('STM协变量Gamma系数图.png' if zh else 'stm_gamma_coefficients.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+            save_figure(plt.gcf(), global_dir / ('STM协变量Gamma系数图.png' if zh else 'stm_gamma_coefficients.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
             plt.close(); print(f"  ✓ STM协变量Gamma系数图.png")
         except Exception as e:
             print(f"  ⚠ gamma: {e}")
 
     # Chart 6: ANOVA F 检验显著性
+    if sum((covariates[:, 0].astype(int) == v).sum() >= 2 for v in unique_vals) < 2:
+        print('[SKIP] ANOVA requires two groups with at least two observations each')
+        return
     try:
         from scipy import stats
         f_stats, p_vals = [], []
@@ -1100,35 +987,30 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300):
                 f, p = stats.f_oneway(*groups)
                 f_stats.append(f); p_vals.append(p)
             else:
-                f_stats.append(0); p_vals.append(1.0)
+                raise ValueError('ANOVA needs at least two groups with two observations each')
         f_stats, p_vals = np.array(f_stats), np.array(p_vals)
-        fig, ax = plt.subplots(figsize=(max(8, K * 0.8), 5))
-        ax.bar(range(K), f_stats, color=['#d62728' if p < 0.05 else '#aec7e8' for p in p_vals], alpha=0.85, edgecolor='white')
-        ax.set_xticks(range(K)); ax.set_xticklabels(topic_labels, rotation=45, ha='right', fontsize=8)
-        ax.set_title('平台对各主题的协变量效应（ANOVA F检验，红=p<0.05）' if zh else 'ANOVA F-Statistic: Platform Effect on Topics', fontsize=10, fontweight='bold')
+        if not np.isfinite(p_vals).all() or not np.isfinite(f_stats).all():
+            raise ValueError('ANOVA undefined for constant/insufficient groups; no inferential chart')
+        order = np.argsort(p_vals)
+        q_vals = np.empty(K)
+        q_vals[order] = np.minimum.accumulate((p_vals[order]*K/np.arange(1,K+1))[::-1])[::-1].clip(0,1)
+        pd.DataFrame({'topic_id': np.arange(K)+1, 'F': f_stats, 'p': p_vals, 'q_BH': q_vals}).to_csv(global_dir/'exploratory_anova.csv',index=False)
+        fig, ax = plt.subplots(figsize=(6.4,max(2.6,K*.3)))
+        ax.barh(range(K),f_stats,color=[COLORS[1] if p<.05 else '#B5C6D1' for p in q_vals],height=.55)
+        ax.set_yticks(range(K),topic_labels);ax.invert_yaxis();ax.set_xlabel('ANOVA F')
+        ax.set_title('探索性组间差异（ANOVA；橙色 BH-FDR q<0.05）' if zh else 'Exploratory group differences (ANOVA; BH-FDR q<0.05)', fontsize=10, fontweight='bold')
         ax.grid(axis='y', alpha=0.3)
-        for i, (f, p) in enumerate(zip(f_stats, p_vals)):
-            ax.text(i, f + f_stats.max() * 0.02, f'p={p:.3f}', ha='center', va='bottom', fontsize=6)
+        for i, (f, p) in enumerate(zip(f_stats, q_vals)):
+            ax.text(1.01,i,f'q={p:.3g}',transform=ax.get_yaxis_transform(),ha='left',va='center',fontsize=8)
         plt.tight_layout()
-        plt.savefig(global_dir / ('协变量效应显著性检验.png' if zh else 'covariate_effect_anova.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+        save_figure(plt.gcf(), global_dir / ('协变量效应显著性检验.png' if zh else 'covariate_effect_anova.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
         plt.close(); print(f"  ✓ 协变量效应显著性检验.png")
     except Exception as e:
         print(f"  ⚠ anova: {e}")
 
 
-def _run_dtm_specific_visualizations(data, output_dir, language='en', dpi=300):
-    """
-    Run DTM-specific visualizations using visualization_generator2.
-    
-    DTM-specific visualizations:
-    - Topic evolution sankey diagram (topic_sankey.png)
-    - Topic strength temporal changes (topic_similarity_evolution.png)
-    - All topics strength table (all_topics_strength_table.png)
-    - High-frequency word evolution (vocab_evolution.png)
-    - Topic independence visualization (topic_independence.png)
-    - Global word cloud (wordcloud_global.png)
-    - Topic proportion pie chart (topic_proportion.png)
-    """
+def _run_dtm_specific_visualizations(data, output_dir, language='en', dpi=300, formats=('png', 'pdf', 'svg')):
+    """Render actual beta_over_time word trajectories; common plots use the shared generator."""
     from pathlib import Path
     import numpy as np
     
@@ -1136,97 +1018,21 @@ def _run_dtm_specific_visualizations(data, output_dir, language='en', dpi=300):
     global_dir = output_dir / 'global'
     global_dir.mkdir(parents=True, exist_ok=True)
     
-    # Try to load DTM-specific data (beta_over_time, topic_evolution)
-    dtm_dir = output_dir.parent
-    
-    # Load beta_over_time from model/ subdirectory
-    beta_over_time = None
-    beta_over_time_file = dtm_dir / 'model' / f"beta_over_time_k{data['theta'].shape[1]}.npy"
-    if not beta_over_time_file.exists():
-        beta_over_time_file = dtm_dir / f"beta_over_time_k{data['theta'].shape[1]}.npy"
-    if beta_over_time_file.exists():
-        beta_over_time = np.load(beta_over_time_file)
-        print(f"  Loaded beta_over_time: {beta_over_time.shape}")
-    
-    # Load topic_evolution from topicwords/ subdirectory
-    topic_evolution = None
-    topic_evolution_file = dtm_dir / 'topicwords' / f"topic_evolution_k{data['theta'].shape[1]}.json"
-    if not topic_evolution_file.exists():
-        topic_evolution_file = dtm_dir / f"topic_evolution_k{data['theta'].shape[1]}.json"
-    if topic_evolution_file.exists():
-        import json
-        with open(topic_evolution_file, 'r', encoding='utf-8') as f:
-            topic_evolution = json.load(f)
-        print(f"  Loaded topic_evolution: {len(topic_evolution)} topics")
-    
-    try:
-        from visualization.visualization_generator2 import VisualizationGenerator as VG2
-        
-        gen2 = VG2(
-            theta=data['theta'],
-            beta=data['beta'],
-            vocab=data['vocab'],
-            topic_words=data['topic_words'],
-            topic_embeddings=data.get('topic_embeddings'),
-            timestamps=data.get('timestamps'),
-            bow_matrix=data.get('bow_matrix'),
-            training_history=data.get('training_history'),
-            metrics=data.get('metrics'),
-            output_dir=str(output_dir),
-            language=language,
-            dpi=dpi
-        )
-        
-        try:
-            gen2.generate_pyldavis()
-        except Exception as e:
-            print(f"  ⚠ topic_independence.png skipped: {e}")
-        
-        try:
-            gen2.generate_global_wordcloud()
-        except Exception as e:
-            print(f"  ⚠ wordcloud_global.png skipped: {e}")
-        
-        try:
-            gen2.generate_topic_proportion_pie()
-        except Exception as e:
-            print(f"  ⚠ topic_proportion.png skipped: {e}")
-        
-        if data.get('timestamps') is not None:
-            try:
-                gen2.generate_sankey_diagram()
-            except Exception as e:
-                print(f"  ⚠ topic_sankey.png skipped: {e}")
-            
-            try:
-                gen2.generate_topic_similarity_evolution()
-            except Exception as e:
-                print(f"  ⚠ topic_similarity_evolution.png skipped: {e}")
-            
-            try:
-                gen2.generate_all_topics_strength_table()
-            except Exception as e:
-                print(f"  ⚠ all_topics_strength_table.png skipped: {e}")
-        
-        if data.get('training_history') is not None:
-            try:
-                gen2.generate_training_convergence()
-            except Exception as e:
-                print(f"  ⚠ training_convergence skipped: {e}")
-        
-    except ImportError as e:
-        print(f"  ⚠ visualization_generator2 not available: {e}")
-    except Exception as e:
-        print(f"  ⚠ DTM visualizations error: {e}")
-    
-    if topic_evolution is not None:
-        try:
-            _generate_topic_word_evolution(topic_evolution, global_dir, language, dpi)
-        except Exception as e:
-            print(f"  ⚠ topic_word_evolution.png skipped: {e}")
+    beta = data.get('beta_over_time')
+    years = data.get('time_slices_info', {}).get('unique_times', [])
+    if beta is None or len(years) != len(beta):
+        print('[Skip] DTM word evolution requires aligned beta_over_time and actual time slices')
+        return
+    # Adapt the actual exported time/topic/word values to the existing renderer's input.
+    evolution = {}
+    for k in range(beta.shape[1]):
+        selected_words = np.argsort(-beta[:, k].mean(axis=0))[:10]
+        evolution[str(k+1)] = {str(year): [(data['vocab'][i], float(beta[t, k, i])) for i in selected_words]
+                              for t, year in enumerate(years)}
+    _generate_topic_word_evolution(evolution, global_dir, language, dpi, formats)
 
 
-def _generate_topic_word_evolution(topic_evolution, output_dir, language='en', dpi=300):
+def _generate_topic_word_evolution(topic_evolution, output_dir, language='en', dpi=300, formats=('png', 'pdf', 'svg')):
     """Generate DTM topic word evolution visualization"""
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1235,60 +1041,34 @@ def _generate_topic_word_evolution(topic_evolution, output_dir, language='en', d
     output_dir = Path(output_dir)
     n_topics = len(topic_evolution)
     
-    n_show = min(6, n_topics)
-    
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
-    
-    for idx, (topic_id, time_data) in enumerate(list(topic_evolution.items())[:n_show]):
-        ax = axes[idx]
-        
-        times = sorted(time_data.keys())
-        
-        if len(times) < 2:
-            ax.text(0.5, 0.5, f'Topic {topic_id}\n(insufficient data)', 
-                   ha='center', va='center', transform=ax.transAxes)
-            ax.axis('off')
-            continue
-        
-        all_words = set()
-        for t in times:
-            words = time_data[t][:5]  # top 5 words
-            for w, _ in words:
-                all_words.add(w)
-        
-        colors = plt.cm.Set2(np.linspace(0, 1, len(all_words)))
-        
-        for i, word in enumerate(list(all_words)[:5]):
-            weights = []
-            for t in times:
-                weight = 0
-                for w, wt in time_data[t]:
-                    if w == word:
-                        weight = wt
-                        break
-                weights.append(weight)
-            
-            ax.plot(range(len(times)), weights, 'o-', color=colors[i], 
-                   label=word, linewidth=2, markersize=4)
-        
-        ax.set_title(f'Topic {topic_id}', fontsize=11, fontweight='bold')
-        ax.set_xlabel('Time', fontsize=9)
-        ax.set_ylabel('Weight', fontsize=9)
-        ax.legend(loc='best', fontsize=7)
-        ax.grid(True, alpha=0.3)
-    
-    for idx in range(n_show, len(axes)):
-        axes[idx].axis('off')
-    
-    title = 'DTM Topic Word Evolution'
-    fig.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(output_dir / 'topic_word_evolution.png', dpi=dpi, 
-               bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"  ✓ topic_word_evolution.png")
+    import pandas as pd
+    records = []
+    items = list(topic_evolution.items())
+    for start in range(0, n_topics, 6):
+        page = items[start:start+6]
+        cols = min(2, len(page)); rows = (len(page)+cols-1)//cols
+        fig, axes = plt.subplots(rows, cols, figsize=(7.2, rows*2.1), squeeze=False, layout='constrained')
+        for ax, (topic_id, time_data) in zip(axes.flat, page):
+            times = list(time_data)  # Preserve the model's actual ordered time slices.
+            # Ordered selection is deterministic, not a set/hash iteration.
+            words = list(dict.fromkeys(word for t in times for word, _ in time_data[t]))[:5]
+            for i, word in enumerate(words):
+                values = [dict(time_data[t]).get(word, np.nan) for t in times]
+                ax.plot(range(len(times)), values, marker=['o','s','^','D','v'][i],
+                        color=COLORS[i], label=word, linewidth=1, markersize=2.5)
+                records.extend({'topic': topic_id, 'time': t, 'word': word, 'weight': value}
+                               for t, value in zip(times, values))
+            ax.set_title(f'T{topic_id}', loc='left', weight='bold')
+            ax.set_xticks(range(len(times)), times, rotation=45, ha='right')
+            ax.set_xlabel('时间' if language == 'zh' else 'Time')
+            ax.set_ylabel('词权重' if language == 'zh' else 'Word weight')
+            ax.legend(loc='upper center',bbox_to_anchor=(.5,-.36),ncol=3,fontsize=7,handlelength=1.2,columnspacing=.8)
+        for ax in list(axes.flat)[len(page):]: ax.axis('off')
+        filename = 'topic_word_evolution' + (f'_{start//6+1}' if start else '') + '.png'
+        save_figure(fig, output_dir / filename, dpi=dpi, formats=formats)
+        plt.close(fig)
+    pd.DataFrame(records).to_csv(output_dir/'dtm_word_evolution.csv', index=False)
+
 
 
 def run_baseline_visualization(
@@ -1298,7 +1078,10 @@ def run_baseline_visualization(
     num_topics=20,
     output_dir=None,
     language='both',  # Changed default to 'both' for bilingual output
-    dpi=300
+    dpi=300,
+    workspace_dir=None,
+    data=None,
+    formats=('png', 'pdf', 'svg')
 ):
     """
     Run visualizations for baseline models (LDA, ETM, CTM, DTM).
@@ -1315,9 +1098,28 @@ def run_baseline_visualization(
     Returns:
         Path to output directory
     """
+    formats = validate_export(dpi, formats)
     # Load data
-    data = load_baseline_data(result_dir, dataset, model, num_topics)
-    
+    if data is None:
+        data = load_baseline_data(result_dir, dataset, model, num_topics, workspace_dir=workspace_dir)
+
+    latent = model == 'nvdm'
+    plot_data = data
+    if model == 'bertopic':
+        # Plot conditional membership among assigned clusters; preserve original matrices and noise labels.
+        labels = np.asarray(data['document_topics'])
+        mass = data['theta'].sum(axis=1)
+        keep = (labels >= 0) & (mass > 0)
+        if not keep.any(): raise ValueError('BERTopic has no assigned documents to visualize')
+        plot_data = dict(data, theta=data['theta'][keep] / mass[keep, None])
+        for key in ['timestamps', 'dimension_values', 'bow_matrix']:
+            if data.get(key) is not None: plot_data[key] = np.asarray(data[key])[keep] if key != 'bow_matrix' else data[key][keep]
+        data['plot_scope'] = f"Conditional membership of {int(keep.sum())}/{len(keep)} assigned documents; {int((~keep).sum())} outlier/zero-mass rows excluded from share charts. Original theta and assignments are unchanged. Beta contains normalized selected c-TF-IDF weights, not generative word probabilities."
+        print('[Scope] ' + data['plot_scope'])
+    if latent:
+        data['theta_semantics'] = 'latent_coordinates'
+        print('[Skip] NVDM theta contains latent coordinates, not probabilities; probability-share and pyLDAvis charts are not applicable.')
+
     # Determine output directory (no language suffix in folder name anymore)
     if output_dir is None:
         result_path = Path(result_dir)
@@ -1354,118 +1156,60 @@ def run_baseline_visualization(
     
     # Generate visualizations for each language
     for lang in languages:
+        lang_output = output_dir / lang if len(languages) > 1 else output_dir
+        setup_style(lang)
         print(f"\n{'='*60}")
         print(f"Generating visualizations ({lang.upper()})")
         print(f"Output: {output_dir}")
         print(f"{'='*60}")
         
         generator = VisualizationGenerator(
-            theta=data['theta'],
+            theta=plot_data['theta'],
             beta=data['beta'],
             vocab=data['vocab'],
             topic_words=data['topic_words'],
             topic_embeddings=data.get('topic_embeddings'),
-            timestamps=data.get('timestamps'),
-            bow_matrix=data.get('bow_matrix'),
+            timestamps=plot_data.get('timestamps'),
+            dimension_values=plot_data.get('dimension_values'),
+            bow_matrix=plot_data.get('bow_matrix'),
             training_history=data.get('training_history'),
+            beta_over_time=data.get('beta_over_time'), time_slices_info=data.get('time_slices_info'),
             metrics=data.get('metrics'),
-            output_dir=str(output_dir),
+            output_dir=str(lang_output),
             language=lang,
-            dpi=dpi
+            dpi=dpi, formats=formats
         )
         
-        generator.generate_all()
+        if latent:
+            (lang_output/'chart-status.json').write_text(json.dumps([{'chart':'sankey_diagram','status':'skipped',
+                'detail':'NVDM 输出有正负值的潜在坐标，不是非负主题权重；不适用权重分配桑基图。'}],ensure_ascii=False,indent=2))
+            generator.generate_topic_table(strength_label='mean_latent_coordinate')
+            # Reuse only existing charts whose inputs don't require probability theta.
+            for topic_idx in range(data['beta'].shape[0]):
+                generator.generate_topic_word_importance(topic_idx)
+            generator.generate_training_convergence()
+        else:
+            generator.generate_all()
         
-        # Additional visualizations using TopicVisualizer
-        try:
-            from visualization.topic_visualizer import TopicVisualizer
-            
-            print(f"\n[Additional Visualizations ({lang.upper()})]")
-            # Use global directory directly under output_dir (new structure)
-            global_dir = output_dir / 'global'
-            global_dir.mkdir(parents=True, exist_ok=True)
-            viz = TopicVisualizer(output_dir=str(global_dir), dpi=dpi, language=lang)
-            
-            # Filename mapping based on language
-            if lang == 'zh':
-                filenames = {
-                    'topic_words_bars': '主题词条形图.png',
-                    'topic_similarity': '主题相似度图.png',
-                    'doc_topic_umap': '文档主题UMAP图.png',
-                    'metrics': '评估指标图.png',
-                    'topic_wordclouds': '主题词云图.png',
-                    'pyldavis_intertopic': '主题间距离图.png',
-                    'pyldavis_interactive': '交互式主题可视化.html',
-                }
-            else:
-                filenames = {
-                    'topic_words_bars': 'topic_words_bars.png',
-                    'topic_similarity': 'topic_similarity.png',
-                    'doc_topic_umap': 'doc_topic_umap.png',
-                    'metrics': 'metrics.png',
-                    'topic_wordclouds': 'topic_wordclouds.png',
-                    'pyldavis_intertopic': 'pyldavis_intertopic.png',
-                    'pyldavis_interactive': 'pyldavis_interactive.html',
-                }
-            
-            viz.visualize_topic_words(data['topic_words'], num_words=10)
-            print(f"  ✓ Per-topic word distribution charts generated")
-            
-            viz.visualize_topic_similarity(data['beta'], data['topic_words'], filename=filenames['topic_similarity'])
-            print(f"  ✓ {filenames['topic_similarity']}")
-            
-            viz.visualize_document_topics(data['theta'], method='umap', max_docs=5000, filename=filenames['doc_topic_umap'])
-            print(f"  ✓ {filenames['doc_topic_umap']}")
-            
-            
-            try:
-                viz.visualize_all_wordclouds(data['topic_words'], num_words=30, filename=filenames['topic_wordclouds'])
-                print(f"  ✓ {filenames['topic_wordclouds']}")
-            except Exception as e:
-                print(f"  ⚠ {filenames['topic_wordclouds']} skipped: {e}")
-            
-            try:
-                viz.visualize_intertopic_distance(data['theta'], data['beta'])
-                viz.visualize_topic_word_frequency(data['beta'], data['topic_words'], selected_topic=0, n_words=30)
-                print(f"  ✓ pyldavis split charts generated")
-            except Exception as e:
-                print(f"  ⚠ pyldavis charts skipped: {e}")
-            
-            try:
-                from visualization.topic_visualizer import generate_pyldavis_visualization
-                html_path = generate_pyldavis_visualization(
-                    theta=data['theta'], beta=data['beta'], bow_matrix=data.get('bow_matrix'),
-                    vocab=data['vocab'], output_path=str(global_dir / filenames['pyldavis_interactive'])
-                )
-                if html_path:
-                    print(f"  ✓ {filenames['pyldavis_interactive']}")
-            except Exception as e:
-                print(f"  ⚠ pyldavis_interactive.html skipped: {e}")
-                
-        except Exception as e:
-            print(f"  ⚠ Additional visualizations error: {e}")
-        
-        if model == 'dtm':
-            try:
-                print(f"\n[DTM-Specific Visualizations ({lang.upper()})]")
-                _run_dtm_specific_visualizations(data, output_dir, lang, dpi)
-            except Exception as e:
-                print(f"  ⚠ DTM-specific visualizations error: {e}")
+        if model == 'bertopic':
+            generator.theta = data['theta']
+            generator.generate_topic_table(strength_label='mean_membership_mass')
 
-        if model == 'stm':
-            try:
-                print(f"\n[STM Covariate Visualizations ({lang.upper()})]")
-                _run_stm_specific_visualizations(data, output_dir, lang, dpi)
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                print(f"  ⚠ STM covariate visualizations error: {e}")
-    
+        _run_additional_visualizations(data, lang_output, lang, dpi, formats, model)
+
     generate_summary_report(data, output_dir)
+    export_manifest(output_dir, dpi, formats, data=data)
+    if data.get('source_metadata'):
+        (Path(output_dir) / 'source-metadata.json').write_text(json.dumps(data['source_metadata'], ensure_ascii=False, indent=2))
     
     print(f"\n{'='*60}")
     print(f"✓ Visualizations saved to: {output_dir}")
     print(f"{'='*60}\n")
     
+    if data.get('plot_scope'):
+        with (output_dir / 'README.md').open('a', encoding='utf-8') as file:
+            file.write('\n\n## Plot scope\n' + data['plot_scope'] + '\n')
+            file.write('pyLDAvis requires generative probabilities with a single aligned beta; it is not applicable to c-TF-IDF or a time-varying beta.\n')
     return output_dir
 
 
@@ -1475,7 +1219,8 @@ def run_all_baseline_visualizations(
     models=None,
     num_topics=20,
     language='en',
-    dpi=300
+    dpi=300,
+    formats=('png', 'pdf', 'svg')
 ):
     """
     Run visualizations for all baseline models.
@@ -1489,9 +1234,9 @@ def run_all_baseline_visualizations(
         dpi: DPI for figures
     """
     if datasets is None:
-        datasets = ['socialTwitter', 'hatespeech', 'mental_health', 'FCPB', 'germanCoal']
+        datasets = sorted(p.name for p in Path(result_dir or 'result/baseline').iterdir() if p.is_dir())
     if models is None:
-        models = ['lda', 'etm', 'ctm_zeroshot']
+        models = ['lda', 'hdp', 'btm', 'stm', 'dtm', 'etm', 'nvdm', 'gsm', 'prodlda', 'ctm', 'ctm_zeroshot', 'ctm_combined', 'bertopic']
     
     print("="*70)
     print("Running Visualizations for All Baseline Models")
@@ -1503,7 +1248,7 @@ def run_all_baseline_visualizations(
         for model in models:
             print(f"\n>>> {dataset} / {model}")
             try:
-                run_baseline_visualization(result_dir, dataset, model, num_topics, language=language, dpi=dpi)
+                run_baseline_visualization(result_dir, dataset, model, num_topics, language=language, dpi=dpi, formats=formats)
                 results[dataset][model] = 'SUCCESS'
             except Exception as e:
                 print(f"  [ERROR] {e}")
@@ -1516,6 +1261,43 @@ def run_all_baseline_visualizations(
         print(f"\n{dataset}:")
         for model, status in models_result.items():
             print(f"  {model}: {status}")
+
+
+def attach_source_metadata(data, source_file, training_data, text_column, time_column=None, group_column=None):
+    """Prove row alignment against training input before attaching research labels."""
+    import pandas as pd
+    from artifact_utils import sha256_file
+    if not training_data or not text_column:
+        raise ValueError('Source metadata requires --training_data and --text_column; row counts alone do not prove alignment')
+    source = Path(source_file)
+    frame = pd.read_excel(source) if source.suffix.lower() in {'.xlsx', '.xls'} else pd.read_csv(source)
+    recorded = pd.read_csv(training_data, keep_default_na=False)
+    raw = frame[text_column].fillna('').astype(str).to_numpy()
+    expected = recorded['text'].astype(str).to_numpy()
+    rows = data.get('source_rows')
+    if rows is not None:
+        rows = np.asarray(rows)
+        if not np.issubdtype(rows.dtype, np.integer) or (rows < 0).any() or (rows >= len(raw)).any():
+            raise ValueError('Invalid source row mapping')
+        raw = raw[rows]
+        if len(expected) != len(raw): expected = expected[rows]
+        frame = frame.iloc[rows].reset_index(drop=True)
+    if len(raw) != len(data['theta']) or not np.array_equal(raw, expected):
+        raise ValueError('Original texts do not match the recorded training input row by row')
+    if time_column:
+        parsed = pd.to_datetime(frame[time_column], errors='coerce', format='mixed')
+        data['timestamps'] = np.array(parsed.dt.to_pydatetime())
+    if group_column:
+        values = frame[group_column].fillna('(missing)').astype(str)
+        # Top categories selected by document count, with the rest explicitly grouped.
+        retained = values.value_counts().head(8).index
+        data['dimension_values'] = np.array(values.where(values.isin(retained), '(other sources)'))
+    data['source_metadata'] = {'source': str(source.resolve()), 'sha256': sha256_file(source),
+        'trainingDataSha256': sha256_file(training_data), 'textColumn': text_column,
+        'timeColumn': time_column, 'groupColumn': group_column, 'rows': len(raw),
+        'grouping': '8 largest groups by document count; all remaining groups combined',
+        'missingTimeRows': int(pd.isna(data.get('timestamps', [])).sum())}
+    return data
 
 
 def main():
@@ -1541,7 +1323,7 @@ Examples:
     parser.add_argument('--all', action='store_true',
                         help='Run for all datasets and models (baseline mode only)')
     parser.add_argument('--model', type=str, default=None,
-                        choices=['lda', 'hdp', 'stm', 'btm', 'etm', 'ctm', 'ctm_zeroshot', 'dtm', 'nvdm', 'gsm', 'prodlda', 'bertopic'],
+                        choices=['lda', 'hdp', 'stm', 'btm', 'etm', 'ctm', 'ctm_zeroshot', 'ctm_combined', 'dtm', 'nvdm', 'gsm', 'prodlda', 'bertopic'],
                         help='Model name (baseline mode only)')
     parser.add_argument('--num_topics', type=int, default=20,
                         help='Number of topics (baseline mode only)')
@@ -1564,7 +1346,19 @@ Examples:
     parser.add_argument('--dpi', type=int, default=300,
                         help='DPI for saved figures')
     
+    parser.add_argument('--formats', nargs='+', choices=['png', 'pdf', 'svg'], default=['png', 'pdf', 'svg'],
+                        help='Export formats; PNG uses --dpi, PDF/SVG retain vector lines/text')
+    parser.add_argument('--workspace_dir', help='Exact preprocessing workspace for this experiment')
+    parser.add_argument('--source_file', help='Original CSV/XLSX for verified metadata alignment')
+    parser.add_argument('--training_data', help='Normalized CSV used in training, with its text column named text')
+    parser.add_argument('--text_column', help='Original source text column')
+    parser.add_argument('--time_column', help='Original source timestamp column')
+    parser.add_argument('--group_column', help='Original source categorical column')
     args = parser.parse_args()
+    validate_export(args.dpi, args.formats)
+    if args.all and args.source_file:
+        parser.error('--source_file requires selecting a single experiment')
+
     
     if args.baseline:
         # Baseline model visualization
@@ -1573,17 +1367,22 @@ Examples:
                 result_dir=args.result_dir or os.path.join(os.environ.get('RESULT_DIR', 'result'), 'baseline'),
                 num_topics=args.num_topics,
                 language=args.language,
-                dpi=args.dpi
+                dpi=args.dpi, formats=args.formats
             )
         elif args.dataset and args.model:
+            data = load_baseline_data(args.result_dir, args.dataset, args.model, args.num_topics, workspace_dir=args.workspace_dir)
+            if args.source_file:
+                attach_source_metadata(data, args.source_file, args.training_data, args.text_column, args.time_column, args.group_column)
             run_baseline_visualization(
                 result_dir=args.result_dir or os.path.join(os.environ.get('RESULT_DIR', 'result'), 'baseline'),
                 dataset=args.dataset,
                 model=args.model,
+                data=data,
+                workspace_dir=args.workspace_dir,
                 num_topics=args.num_topics,
                 output_dir=args.output_dir,
                 language=args.language,
-                dpi=args.dpi
+                dpi=args.dpi, formats=args.formats
             )
         else:
             parser.error("Baseline mode requires --all or both --dataset and --model")
@@ -1591,14 +1390,18 @@ Examples:
         # THETA model visualization
         if not args.result_dir or not args.dataset or not args.mode:
             parser.error("THETA mode requires --result_dir, --dataset, and --mode")
+        data = load_visualization_data(args.result_dir, args.dataset, args.mode, model_size=args.model_size)
+        if args.source_file:
+            attach_source_metadata(data, args.source_file, args.training_data, args.text_column, args.time_column, args.group_column)
         run_all_visualizations(
+            data=data,
             result_dir=args.result_dir,
             dataset=args.dataset,
             mode=args.mode,
             model_size=args.model_size,
             output_dir=args.output_dir,
             language=args.language,
-            dpi=args.dpi,
+            dpi=args.dpi, formats=args.formats,
             model_type='theta',
             num_topics=args.num_topics
         )

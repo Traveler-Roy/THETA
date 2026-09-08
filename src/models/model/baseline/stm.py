@@ -69,6 +69,18 @@ def _check_r_stm_available() -> bool:
         return False
 
 
+def _document_gradient(doc_bow, beta, theta, eta, prior_mean, prior_precision):
+    """Gradient of multinomial log likelihood plus the logistic-normal log prior.
+
+    Responsibilities allocate each observed word count across topics. Subtracting
+    N * theta accounts for the softmax normalization (last topic is reference).
+    """
+    word_probabilities = np.maximum(theta @ beta, 1e-300)
+    expected_topic_counts = theta * (beta @ (doc_bow / word_probabilities))
+    return (expected_topic_counts[:-1] - doc_bow.sum() * theta[:-1]
+            - prior_precision @ (eta - prior_mean))
+
+
 class STM(TraditionalTopicModel):
     """
     Structural Topic Model
@@ -311,13 +323,9 @@ class STM(TraditionalTopicModel):
                     # Gradient: doc_counts * (I_{-K} - theta_{-K}) - Sigma_inv @ (eta_d - mu_d)
                     Sigma_inv = np.linalg.solve(Sigma, np.eye(K - 1))
                     
-                    # Expected word counts contribution
-                    grad = doc_total * (doc_bow @ Beta[:, :].T)  # not used directly
-                    
-                    # Simplified gradient for logistic-normal
-                    theta_mk = theta_d[:-1]  # first K-1
-                    diff = eta_d - mu_d
-                    gradient = doc_total * (theta_mk - theta_d[:-1]) - Sigma_inv @ diff
+                    # Reuse the corrected word-evidence gradient from agent-dev.
+                    theta_mk = theta_d[:-1]
+                    gradient = _document_gradient(doc_bow, Beta, theta_d, eta_d, mu_d, Sigma_inv)
                     
                     # Approximate Hessian (diagonal)
                     hess_diag = -doc_total * theta_mk * (1 - theta_mk) - np.diag(Sigma_inv)

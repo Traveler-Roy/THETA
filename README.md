@@ -685,3 +685,7 @@ For questions, please contact:
 ## License
 
 Apache-2.0
+
+[Publication figures and high-resolution export](docs/publication-visualization.md)
+
+[Bilingual figure atlas examples](docs/examples/figure-atlas/README.md)

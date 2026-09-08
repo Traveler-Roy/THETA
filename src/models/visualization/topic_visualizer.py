@@ -32,7 +32,47 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+import matplotlib
+from visualization.publication import COLORS, setup_style, save_figure, validate_export
+
 logger = logging.getLogger(__name__)
+
+
+def draw_document_projection(coords, topics, *, method, language, total_count, title=None):
+    """Show every sampled point plus an explicitly bounded detail view; never move points."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Rectangle
+    coords, topics = np.asarray(coords), np.asarray(topics)
+    q1, q3 = np.quantile(coords, [.25, .75], axis=0)
+    low = np.maximum(coords.min(axis=0), q1-1.5*(q3-q1))
+    high = np.minimum(coords.max(axis=0), q3+1.5*(q3-q1))
+    span = high - low
+    low -= np.where(span > 0, 0, .5)
+    high += np.where(span > 0, 0, .5)
+    inside = np.all((coords >= low) & (coords <= high), axis=1)
+    zoom = not inside.all()
+    fig, axes = plt.subplots(1,2 if zoom else 1,figsize=(7.15,3.5) if zoom else (5.4,3.7),
+                             width_ratios=[1,1.8] if zoom else [1],layout='constrained',squeeze=False)
+    axes=axes.ravel()
+    unique = np.unique(topics)
+    for ax in axes:
+        for topic in unique:
+            mask = topics == topic
+            ax.scatter(*coords[mask].T, s=5 if len(coords)>1000 else 20, alpha=.65 if len(coords)>1000 else .85, linewidths=0,
+                       c=COLORS[int(topic) % len(COLORS)] if topic >= 0 else '#9BA3A8', rasterized=True)
+        ax.set_xlabel(f'{method} 1'); ax.set_ylabel(f'{method} 2')
+        ax.locator_params(nbins=4)
+    if zoom:
+        axes[0].add_patch(Rectangle(low, *(high-low), fill=False, edgecolor='#333333', linewidth=.8, linestyle='--'))
+        axes[1].set_xlim(low[0], high[0]); axes[1].set_ylim(low[1], high[1])
+        axes[0].set_title('全景' if language == 'zh' else 'Overview')
+        axes[1].set_title(('局部' if language == 'zh' else 'Detail') + f' · n={inside.sum():,}')
+    handles = [Line2D([], [], marker='o', linestyle='', color=COLORS[int(t)%len(COLORS)] if t>=0 else '#9BA3A8',
+               label=f'T{int(t)+1}' if t>=0 else ('未分配 / 诊断离群' if language=='zh' else 'Unassigned / diagnostic noise')) for t in unique]
+    fig.legend(handles=handles, loc='outside lower center', ncol=min(6,len(handles)), fontsize=7)
+    note = '局部：四分位范围外扩 1.5×IQR；全景保留全部点' if language=='zh' else 'Detail: axis-wise quartiles ± 1.5×IQR; overview retains all points'
+    fig.suptitle((title or f'{method} · n={len(coords):,}/{total_count:,} · seed=42')+('\n'+note if zoom else ''), fontsize=9, ha='left', x=.02)
+    return fig
 
 
 class TopicVisualizer:
@@ -50,10 +90,11 @@ class TopicVisualizer:
         self,
         output_dir: str = None,
         figsize: Tuple[int, int] = (12, 8),
-        dpi: int = 100,
+        dpi: int = 300,
         cmap: str = "viridis",
         random_state: int = 42,
-        language: str = 'en'
+        language: str = 'en',
+        formats=('png', 'pdf', 'svg')
     ):
         """
         Initialize visualizer.
@@ -72,6 +113,7 @@ class TopicVisualizer:
         
         self.figsize = figsize
         self.dpi = dpi
+        self.formats = validate_export(dpi, formats)
         self.cmap = cmap
         self.random_state = random_state
         self.language = language
@@ -113,94 +155,14 @@ class TopicVisualizer:
         }
         
         # Set plot style
-        plt.style.use('seaborn-v0_8-whitegrid')
         
         self._setup_chinese_fonts()
-    
+
     def _setup_chinese_fonts(self):
-        """设置中文字体支持"""
-        import matplotlib
-        import matplotlib.font_manager as fm
-        import platform
-        import os
-        
-        # Platform-specific font paths
-        system = platform.system().lower()
-        font_paths = []
-        
-        if system == 'windows':
-            # Windows font paths
-            windows_fonts = [
-                'C:/Windows/Fonts/msyh.ttc',      # Microsoft YaHei
-                'C:/Windows/Fonts/simhei.ttf',    # SimHei
-                'C:/Windows/Fonts/simsun.ttc',    # SimSun
-                'C:/Windows/Fonts/NSimSun.ttf',   # NSimSun
-            ]
-            font_paths.extend(windows_fonts)
-        elif system == 'linux':
-            # Linux font paths
-            linux_fonts = [
-                '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
-                '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-                '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-            ]
-            font_paths.extend(linux_fonts)
-        elif system == 'darwin':  # macOS
-            mac_fonts = [
-                '/System/Library/Fonts/PingFang.ttc',
-                '/System/Library/Fonts/STHeiti Light.ttc',
-                '/System/Library/Fonts/STHeiti Medium.ttc',
-            ]
-            font_paths.extend(mac_fonts)
-        
-        # Try to load fonts
-        fonts_loaded = []
-        for fp in font_paths:
-            if os.path.exists(fp):
-                try:
-                    fm.fontManager.addfont(fp)
-                    fonts_loaded.append(fp)
-                except Exception as e:
-                    pass  # Silently skip if font already loaded
-        
-        # Rebuild font cache if fonts were added
-        if fonts_loaded:
-            try:
-                fm._load_fontmanager(try_read_cache=False)
-            except:
-                pass
-        
-        chinese_fonts = [
-            'Noto Sans CJK SC',
-            'Noto Sans CJK TC',
-            'WenQuanYi Zen Hei',
-            'WenQuanYi Micro Hei',
-            'Microsoft YaHei',
-            'SimHei',
-            'PingFang SC',
-            'SimSun',
-            'NSimSun',
-            'DejaVu Sans'
-        ]
-        matplotlib.rcParams['font.sans-serif'] = chinese_fonts
-        matplotlib.rcParams['axes.unicode_minus'] = False
-        
-        # Store font path for wordcloud usage
-        self.chinese_font_path = None
-        for fp in font_paths:
-            if os.path.exists(fp):
-                self.chinese_font_path = fp
-                break
-        
-        # Verify font availability
-        available_fonts = [f.name for f in fm.fontManager.ttflist]
-        chinese_available = [f for f in chinese_fonts if f in available_fonts]
-        
-        if chinese_available:
-            print(f"✓ Chinese fonts available: {chinese_available[0]}")
-        else:
-            print("⚠ Warning: No Chinese fonts found, text may appear as squares")
-            print("  Please install: apt-get install -y fonts-noto-cjk fonts-wqy-zenhei")
+        self.chinese_font_path = setup_style(self.language)
+
+    def _save_figure(self, fig, filename, **kwargs):
+        return save_figure(fig, filename, formats=self.formats, **kwargs)
     
     def _get_label(self, key: str) -> str:
         """获取双语标签"""
@@ -219,13 +181,42 @@ class TopicVisualizer:
         """Save figure to file or show it"""
         if filename and self.output_dir:
             filepath = os.path.join(self.output_dir, filename)
-            fig.savefig(filepath, dpi=self.dpi, bbox_inches='tight')
+            filepath = self._save_figure(fig, filepath, dpi=self.dpi, bbox_inches='tight')[0]
+            plt.close(fig)
             logger.info(f"Figure saved to {filepath}")
             return filepath
         else:
             plt.show()
             return None
     
+    def _make_wordcloud(self, frequencies, num_words, topic_idx=0, color_func=None, shape="ellipse"):
+        """One native layout for model, legacy and combined word-cloud entry points."""
+        frequencies = {word: float(weight) for word, weight in frequencies.items()
+                       if word.strip() and np.isfinite(weight) and weight > 0}
+        if not frequencies:
+            raise ValueError('Word cloud requires positive, finite word weights')
+        ranked = sorted(frequencies, key=frequencies.get, reverse=True)
+        ranks = {word: rank for rank, word in enumerate(ranked)}
+        accent = np.array(matplotlib.colors.to_rgb(COLORS[topic_idx % len(COLORS)]))
+        def topic_color(word, **kwargs):
+            rank = ranks[word]
+            color = accent * .70 if rank < 3 else accent if rank < 8 else accent*.60 + np.array([.48,.52,.55])*.40
+            return matplotlib.colors.to_hex(color)
+        font = self.chinese_font_path
+        # Prefer the installed medium face where available, without downloading fonts.
+        if font:
+            medium = Path(font).with_name(Path(font).name.replace('Light', 'Medium'))
+            if medium.is_file(): font = str(medium)
+        if shape not in {'ellipse','rectangle'}: raise ValueError('shape must be ellipse or rectangle')
+        y, x = np.ogrid[-1:1:620j, -1:1:1100j]
+        mask = np.where(x*x + y*y > 1, 255, 0).astype(np.uint8)
+        return WordCloud(mask=mask if shape=='ellipse' else None, width=1100, height=780, font_path=font, background_color='white',
+                         prefer_horizontal=1.0 if shape=="ellipse" else .90, margin=12 if shape=="ellipse" else 4, max_font_size=280,
+                         min_font_size=16, relative_scaling=.5, repeat=False,
+                         scale=max(1, self.dpi/180), max_words=num_words,
+                         random_state=self.random_state, color_func=color_func or topic_color
+                         ).generate_from_frequencies(frequencies)
+
     def visualize_topic_words(
         self,
         topic_words: List[Tuple[int, List[Tuple[str, float]]]],
@@ -264,15 +255,9 @@ class TopicVisualizer:
                 word_freq = {word: prob for word, prob in words[:num_words*2]}
                 
                 # Create word cloud
-                fig, ax = plt.subplots(figsize=(10, 6))
-                wc = WordCloud(
-                    background_color='white',
-                    width=800,
-                    height=400,
-                    max_words=num_words,
-                    random_state=self.random_state
-                ).generate_from_frequencies(word_freq)
-                
+                fig, ax = plt.subplots(figsize=(5.6, 3.5))
+                wc = self._make_wordcloud(word_freq, num_words, topic_idx)
+
                 ax.imshow(wc, interpolation='bilinear')
                 ax.axis('off')
                 
@@ -287,20 +272,27 @@ class TopicVisualizer:
             return figs
         else:
             # Generate one individual chart per topic
-            colors = plt.cm.Spectral(np.linspace(0, 1, num_topics))
+            colors = [COLORS[i % len(COLORS)] for i in range(num_topics)]
             saved_paths = []
             
             for i, (topic_idx, words) in enumerate(topic_words[:num_topics]):
-                fig, ax = plt.subplots(figsize=(8, 6), facecolor='white')
+                fig, ax = plt.subplots(figsize=(5.2, 3.1), facecolor='white')
                 
                 top_words = [word for word, _ in words[:num_words]]
                 top_probs = [prob for _, prob in words[:num_words]]
                 
                 y_pos = np.arange(len(top_words))
-                ax.barh(y_pos, top_probs, align='center', color=colors[i], edgecolor='white', linewidth=0.5)
+                ax.barh(y_pos, top_probs, align='center', color=COLORS[topic_idx % len(COLORS)], height=.55, linewidth=0)
                 ax.set_yticks(y_pos)
-                ax.set_yticklabels(top_words, fontsize=9)
+                ax.set_yticklabels([f'{j+1:02d}  {w}' for j,w in enumerate(top_words)], fontsize=9)
+                for j, value in enumerate(top_probs):
+                    ax.text(1.01, j, f'{value:.4g}', transform=ax.get_yaxis_transform(), va='center', fontsize=8)
+                ax.spines['left'].set_visible(False)
+                ax.tick_params(axis='y', length=0)
+                ax.set_xlim(0, max(top_probs)*1.06)
                 ax.invert_yaxis()
+                ax.set_xlabel('词权重' if self.language == 'zh' else 'Word weight')
+                ax.set_title(f'T{topic_idx + 1} · ' + ('主题词权重' if self.language=='zh' else 'Topic-word weights'), loc='left', weight='bold')
                 ax.tick_params(axis='x', labelsize=8)
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
@@ -318,7 +310,7 @@ class TopicVisualizer:
                 os.makedirs(topic_dir, exist_ok=True)
                 topic_filepath = os.path.join(topic_dir, topic_filename)
                 
-                fig.savefig(topic_filepath, dpi=self.dpi, bbox_inches='tight')
+                self._save_figure(fig, topic_filepath, dpi=self.dpi, bbox_inches='tight')
                 logger.info(f"Figure saved to {topic_filepath}")
                 saved_paths.append(topic_filepath)
                 plt.close(fig)
@@ -348,43 +340,20 @@ class TopicVisualizer:
         
         saved_paths = []
         
-        # Use viridis colormap for different topic colors
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(topic_words)))
-        
-        def make_color_func(color):
-            """Create a color function with proper closure"""
-            def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
-                # Add some variation based on font_size
-                factor = 0.7 + 0.3 * (font_size / 100)
-                r = int(min(255, color[0] * 255 * factor))
-                g = int(min(255, color[1] * 255 * factor))
-                b = int(min(255, color[2] * 255 * factor))
-                return f"rgb({r}, {g}, {b})"
-            return color_func
-        
         for i, (topic_idx, words) in enumerate(topic_words):
             # Create individual figure for each topic
-            fig, ax = plt.subplots(figsize=(8, 6), facecolor='white')
+            fig, ax = plt.subplots(figsize=(5.6, 3.5), facecolor='white')
             
-            word_freq = {word: prob for word, prob in words[:num_words]}
+            word_freq = {word: prob for word, prob in words[:num_words] if word.strip() and np.isfinite(prob) and prob > 0}
             
             try:
-                wc_kwargs = {
-                    'background_color': 'white',
-                    'width': 800,
-                    'height': 600,
-                    'max_words': num_words,
-                    'random_state': self.random_state,
-                    'color_func': make_color_func(colors[i])
-                }
-                if self.chinese_font_path:
-                    wc_kwargs['font_path'] = self.chinese_font_path
-                
-                wc = WordCloud(**wc_kwargs).generate_from_frequencies(word_freq)
-                
+                wc = self._make_wordcloud(word_freq, num_words, topic_idx)
+
                 ax.imshow(wc, interpolation='bilinear')
+                ax.set_title(f'T{topic_idx+1} · ' + ('主题关键词' if self.language=='zh' else 'Topic keywords'), fontsize=10)
             except Exception as e:
-                ax.text(0.5, 0.5, f'Topic {topic_idx + 1}\n(error)', ha='center', va='center')
+                plt.close(fig)
+                raise ValueError(f'Word cloud T{topic_idx+1} failed: {e}') from e
             
             ax.axis('off')
             
@@ -398,13 +367,38 @@ class TopicVisualizer:
                 topic_filename = f'Topic {topic_idx + 1} Word Cloud.png'
             
             topic_filepath = os.path.join(topic_dir, topic_filename)
-            fig.savefig(topic_filepath, dpi=self.dpi, bbox_inches='tight', facecolor='white')
+            self._save_figure(fig, topic_filepath, dpi=self.dpi, bbox_inches='tight', facecolor='white')
             logger.info(f"Word cloud saved to {topic_filepath}")
             saved_paths.append(topic_filepath)
             plt.close(fig)
         
         return saved_paths
     
+    def visualize_wordcloud_grid(self, topic_words, num_words=80, columns=3, topics_per_page=6):
+        """Rectangular topic panels, paginated with titles outside the word images."""
+        if not WORDCLOUD_AVAILABLE:
+            raise RuntimeError('WordCloud package is required')
+        if not 1 <= columns <= 3 or not 1 <= topics_per_page <= 6:
+            raise ValueError('Use 1–3 columns and 1–6 topics per page to preserve readable type')
+        paths=[]
+        for start in range(0,len(topic_words),topics_per_page):
+            page=topic_words[start:start+topics_per_page]
+            ncols=min(columns,len(page));nrows=int(np.ceil(len(page)/ncols))
+            fig,axes=plt.subplots(nrows,ncols,figsize=(7.15,2.35*nrows+.45),squeeze=False,layout='constrained')
+            for ax,(topic_idx,words) in zip(axes.flat,page):
+                frequencies={word:weight for word,weight in words[:num_words]}
+                cloud=self._make_wordcloud(frequencies,num_words,topic_idx,shape='rectangle')
+                ax.imshow(cloud,interpolation='bilinear');ax.axis('off')
+                # A separate two-line header stays outside the image's extent.
+                from textwrap import fill
+                ax.set_title(f'T{topic_idx+1}\n'+fill(' · '.join(w for w,_ in words[:2]),18),fontsize=8,pad=8)
+            for ax in list(axes.flat)[len(page):]:ax.set_visible(False)
+            fig.suptitle(('各主题词云' if self.language=='zh' else 'Topic word clouds')+
+                         f' · K={len(topic_words)} · {start+1}–{start+len(page)}',fontsize=10)
+            path=Path(self.output_dir)/f'topic_wordcloud_grid_{start//topics_per_page+1}.png'
+            paths.extend(self._save_figure(fig,path,dpi=self.dpi));plt.close(fig)
+        return paths
+
     def visualize_combined_wordcloud(
         self,
         topic_words: List[Tuple[int, List[Tuple[str, float]]]],
@@ -429,19 +423,19 @@ class TopicVisualizer:
         # Combine all words from all topics
         combined_freq = {}
         num_topics = len(topic_words)
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, num_topics))
+        colors = [matplotlib.colors.to_rgba(COLORS[i % len(COLORS)]) for i in range(num_topics)]
         word_colors = {}
         
         for i, (topic_idx, words) in enumerate(topic_words):
             for word, prob in words[:num_words]:
                 if word not in combined_freq:
                     combined_freq[word] = prob
-                    word_colors[word] = colors[i]
+                    word_colors[word] = matplotlib.colors.to_rgba(COLORS[topic_idx % len(COLORS)])
                 else:
                     # Keep the higher probability and its color
                     if prob > combined_freq[word]:
                         combined_freq[word] = prob
-                        word_colors[word] = colors[i]
+                        word_colors[word] = matplotlib.colors.to_rgba(COLORS[topic_idx % len(COLORS)])
         
         def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
             if word in word_colors:
@@ -449,18 +443,11 @@ class TopicVisualizer:
                 return f"rgb({int(c[0]*255)}, {int(c[1]*255)}, {int(c[2]*255)})"
             return "rgb(100, 100, 100)"
         
-        fig, ax = plt.subplots(figsize=(12, 12), facecolor='white')
+        fig, ax = plt.subplots(figsize=(6.4, 4), facecolor='white')
         
         try:
-            wc = WordCloud(
-                background_color='white',
-                width=1000,
-                height=1000,
-                max_words=300,
-                random_state=self.random_state,
-                color_func=color_func
-            ).generate_from_frequencies(combined_freq)
-            
+            wc = self._make_wordcloud(combined_freq, 300, color_func=color_func)
+
             ax.imshow(wc, interpolation='bilinear')
         except Exception as e:
             ax.text(0.5, 0.5, f'Error: {e}', ha='center', va='center')
@@ -485,60 +472,23 @@ class TopicVisualizer:
         Returns:
             Figure with metrics bar chart
         """
-        # Filter and select key metrics (exclude perplexity and UMass)
-        key_metrics = {}
-        metric_mapping = {
-            'topic_diversity_td': 'diversity_td',
-            'topic_diversity_irbo': 'diversity_irbo',
-            'topic_coherence_npmi_avg': 'coherence_npmi',
-            'topic_coherence_cv_avg': 'coherence_cv',
-            'topic_exclusivity_avg': 'exclusivity',
-            # Legacy keys
-            'diversity_td': 'diversity_td',
-            'diversity_irbo': 'diversity_irbo',
-            'coherence_npmi_avg': 'coherence_npmi',
-            'coherence_cv_avg': 'coherence_cv',
-            'exclusivity_avg': 'exclusivity',
-        }
-        
-        for key, label_key in metric_mapping.items():
-            display_name = self._get_label(label_key)
-            if key in metrics and display_name not in key_metrics:
-                key_metrics[display_name] = metrics[key]
-        
-        if not key_metrics:
-            logger.warning("No metrics to visualize")
-            return None
-        
-        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
-        
-        names = list(key_metrics.keys())
-        values = list(key_metrics.values())
-        
-        # Use Spectral colormap
-        colors = plt.cm.Spectral(np.linspace(0.1, 0.9, len(names)))
-        
-        bars = ax.bar(names, values, color=colors, edgecolor='black', linewidth=0.5)
-        
-        # Add value labels on bars
-        for bar, val in zip(bars, values):
-            height = bar.get_height()
-            ax.annotate(f'{val:.4f}',
-                       xy=(bar.get_x() + bar.get_width() / 2, height),
-                       xytext=(0, 3),
-                       textcoords="offset points",
-                       ha='center', va='bottom', fontsize=10, fontweight='bold')
-        
-        ax.set_ylabel(self._get_label('value'), fontsize=12)
-        ax.tick_params(axis='x', rotation=15)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.set_ylim(0, max(values) * 1.15)
-        
-        plt.tight_layout()
-        
+        aliases = {'TD': ['TD', 'topic_diversity_td'], 'iRBO': ['iRBO', 'topic_diversity_irbo'],
+                   'NPMI': ['NPMI', 'topic_coherence_npmi_avg'], 'C_V': ['C_V', 'topic_coherence_cv_avg'],
+                   'UMass': ['UMass', 'topic_coherence_umass_avg'],
+                   'Exclusivity': ['Exclusivity', 'topic_exclusivity_avg'], 'PPL': ['PPL', 'perplexity']}
+        items = []
+        for label, keys in aliases.items():
+            value = next((metrics[key] for key in keys if isinstance(metrics.get(key), (int, float))
+                          and np.isfinite(metrics[key])), None)
+            if value is not None: items.append((label, value))
+        if not items: return None
+        fig, axes = plt.subplots(1, len(items), figsize=(7.2, 1.2), squeeze=False)
+        for ax, (name, value) in zip(axes[0], items):
+            ax.axis('off')
+            ax.text(.5, .75, name, ha='center', weight='bold')
+            ax.text(.5, .35, f'{value:.4g}', ha='center')
         return self._save_or_show(fig, filename)
-    
+
     def visualize_topic_similarity(
         self,
         beta: np.ndarray,
@@ -593,7 +543,7 @@ class TopicVisualizer:
             show_annot = False
             fontsize = 8
         else:
-            fig, ax = plt.subplots(figsize=(12, 10))
+            fig, ax = plt.subplots(figsize=(5.4, 4.6))
             show_annot = True
             fontsize = 10
         
@@ -602,11 +552,11 @@ class TopicVisualizer:
             annot=show_annot,
             fmt='.2f' if show_annot else '',
             annot_kws={'size': 8} if show_annot else {},
-            cmap='RdYlBu_r',
+            cmap='RdBu_r' if metric == 'correlation' else 'Blues',
             xticklabels=[self._get_topic_label(i, short=True) for i in range(num_topics)],
             yticklabels=[self._get_topic_label(i, short=True) for i in range(num_topics)],
             ax=ax,
-            vmin=0,
+            vmin=-1 if metric == 'correlation' else 0,
             vmax=1,
             linewidths=0.3 if num_topics > 20 else 0.5,
             square=True,
@@ -616,7 +566,8 @@ class TopicVisualizer:
         # ax.set_title(f"{self._get_label('topic_similarity_matrix')} ({metric.title()})", fontsize=16, fontweight='bold')
         
         # Rotate x-axis labels for readability
-        plt.xticks(rotation=45, ha='right', fontsize=fontsize)
+        ax.set_title(f'{metric.title()} · β')
+        plt.xticks(rotation=0, fontsize=fontsize)
         plt.yticks(rotation=0, fontsize=fontsize)
         
         # Save or show
@@ -648,24 +599,28 @@ class TopicVisualizer:
         # Sample documents if too many
         n_docs = theta.shape[0]
         if n_docs > max_docs:
-            indices = np.random.choice(n_docs, max_docs, replace=False)
+            indices = np.sort(np.random.default_rng(self.random_state).choice(n_docs, max_docs, replace=False))
             theta_sample = theta[indices]
         else:
+            indices = np.arange(n_docs)
             theta_sample = theta
             max_docs = n_docs
         
         # Get dominant topic for each document
-        dominant_topics = np.argmax(theta_sample, axis=1)
+        dominant_topics = np.asarray(labels)[indices] if labels is not None else np.argmax(theta_sample, axis=1)
         num_topics = theta_sample.shape[1]
         
         # Apply dimensionality reduction
+        if method == 'umap' and (len(theta_sample) < 5 or theta_sample.shape[1] < 2):
+            method = 'pca'
         if method == 'umap':
             try:
                 import umap
                 reducer = umap.UMAP(
                     n_components=2,
                     random_state=self.random_state,
-                    n_neighbors=30,
+                    n_neighbors=min(30, len(theta_sample)-1),
+                    n_jobs=1,
                     min_dist=0.3,
                     spread=1.0,
                     metric='cosine'
@@ -680,67 +635,15 @@ class TopicVisualizer:
             raise ValueError(f"Unknown method: {method}")
         
         # Reduce dimensions
-        theta_2d = reducer.fit_transform(theta_sample)
+        if min(theta_sample.shape) < 2:
+            theta_2d = np.column_stack((theta_sample[:, 0], np.zeros(len(theta_sample))))
+        else:
+            theta_2d = reducer.fit_transform(theta_sample)
         
-        # Create figure with clean white background
-        fig, ax = plt.subplots(figsize=(10, 10), facecolor='white')
-        ax.set_facecolor('white')
-        
-        # Vibrant, distinct colors (publication quality)
-        color_palette = [
-            '#E24A33', '#348ABD', '#988ED5', '#777777', '#FBC15E',
-            '#8EBA42', '#FFB5B8', '#56B4E9', '#009E73', '#F0E442',
-            '#0072B2', '#D55E00', '#CC79A7', '#E69F00', '#999999',
-            '#66C2A5', '#FC8D62', '#8DA0CB', '#E78AC3', '#A6D854'
-        ]
-        colors = [color_palette[i % len(color_palette)] for i in range(num_topics)]
-        
-        # Plot documents colored by dominant topic with small dots
-        for topic_id in range(num_topics):
-            mask = (dominant_topics == topic_id)
-            if mask.sum() > 0:
-                ax.scatter(
-                    theta_2d[mask, 0],
-                    theta_2d[mask, 1],
-                    c=colors[topic_id],
-                    alpha=0.8,
-                    s=3,  # Small dots
-                    label=self._get_topic_label(topic_id),
-                    rasterized=True,
-                    linewidths=0  # No edge
-                )
-        
-        # Keep axes with labels, remove grid
-        ax.set_xlabel('UMAP 1' if self.language == 'en' else 'UMAP维度1', fontsize=11)
-        ax.set_ylabel('UMAP 2' if self.language == 'en' else 'UMAP维度2', fontsize=11)
-        ax.tick_params(axis='both', labelsize=9)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.grid(False)  # Remove grid lines
-        
-        # Compact legend
-        ax.legend(
-            loc='upper left', 
-            bbox_to_anchor=(1.01, 1),
-            fontsize=8,
-            frameon=False,
-            markerscale=3,
-            handletextpad=0.3,
-            borderpad=0.2,
-            ncol=1
-        )
-        
-        # Remove figure caption as requested
-        # if self.language == 'zh':
-        # else:
-        #     caption = f'Figure: Document-topic distribution ({method.upper()}, n={max_docs:,}, K={num_topics})'
-        # fig.text(0.5, 0.02, caption, ha='center', fontsize=10, style='italic')
-        
-        plt.tight_layout(rect=[0, 0.05, 1, 1])
-        
-        # Save or show
+        fig = draw_document_projection(theta_2d, dominant_topics, method=method.upper(),
+                                       language=self.language, total_count=n_docs)
         return self._save_or_show(fig, filename)
-    
+
     def visualize_training_history(
         self,
         history: Dict,
@@ -859,7 +762,7 @@ class TopicVisualizer:
         fig, ax = plt.subplots(figsize=(12, 6), facecolor='white')
         
         # Use viridis colormap
-        colors = plt.cm.viridis(np.linspace(0.1, 0.9, num_topics))
+        colors = [matplotlib.colors.to_rgba(COLORS[i % len(COLORS)]) for i in range(num_topics)]
         
         # Create vertical bar plot for all topics
         x_pos = np.arange(num_topics)
@@ -911,103 +814,66 @@ class TopicVisualizer:
         n_topics = beta.shape[0]
         topic_proportions = theta.mean(axis=0)
         
-        # PCA/t-SNE for topic positions
-        if n_topics > 3:
-            tsne = TSNE(n_components=2, random_state=42, perplexity=min(5, n_topics-1),
-                        max_iter=1000, learning_rate='auto', init='pca')
-            topic_coords = tsne.fit_transform(beta)
+        if min(beta.shape) >= 2:
+            topic_coords = PCA(n_components=2).fit_transform(beta)
         else:
-            pca = PCA(n_components=2)
-            topic_coords = pca.fit_transform(beta)
-        
-        topic_coords = topic_coords * 2.0
-        
-        fig, ax = plt.subplots(figsize=(14, 10))
+            topic_coords = np.zeros((n_topics, 2))
+
+        fig, ax = plt.subplots(figsize=(6.4, 4.4))
         
         cmap = plt.cm.tab20
-        colors = [cmap(i / n_topics) for i in range(n_topics)]
-        sizes = topic_proportions * 15000 + 1500
+        colors = [COLORS[i % len(COLORS)] for i in range(n_topics)]
+        sizes = topic_proportions * 2800
         sorted_indices = np.argsort(-sizes)
         
         for idx, i in enumerate(sorted_indices):
             z_order = 2 + (n_topics - idx)
             ax.scatter(topic_coords[i, 0], topic_coords[i, 1],
                        s=sizes[i], c=[colors[i]], alpha=0.75,
-                       edgecolors='white', linewidths=3, zorder=z_order)
-            ax.annotate(str(i+1), (topic_coords[i, 0], topic_coords[i, 1]),
-                        ha='center', va='center', fontsize=14, fontweight='bold',
-                        zorder=z_order + 100)
-        
+                       edgecolors='white', linewidths=.8, zorder=z_order)
+        # Label packing changes annotations only, not PCA coordinates or bubble areas.
+        xspan, yspan = np.maximum(np.ptp(topic_coords, axis=0), 1e-4)
+        mid = np.median(topic_coords[:, 0])
+        for side in [-1, 1]:
+            ids = np.flatnonzero(topic_coords[:, 0] <= mid if side < 0 else topic_coords[:, 0] > mid)
+            ids = ids[np.argsort(topic_coords[ids, 1])]
+            label_y = topic_coords[ids, 1].copy()
+            for j in range(1, len(ids)): label_y[j] = max(label_y[j], label_y[j-1]+yspan*.12)
+            if len(ids): label_y -= (label_y.mean()-topic_coords[ids, 1].mean())
+            for i, y in zip(ids, label_y):
+                x = topic_coords[i,0]+side*.10*xspan
+                ax.annotate(f'T{i+1}', topic_coords[i], xytext=(x,y), color=colors[i], weight='bold',
+                            ha='right' if side<0 else 'left', va='center',
+                            arrowprops=dict(arrowstyle='-',color='#9BA3A8',lw=.65), annotation_clip=False)
+        ax.margins(x=.3,y=.25)
+
         ax.set_xlabel('PC1', fontsize=14)
         ax.set_ylabel('PC2', fontsize=14)
         ax.axhline(y=0, color='gray', linestyle='-', linewidth=0.5)
         ax.axvline(x=0, color='gray', linestyle='-', linewidth=0.5)
         ax.grid(True, alpha=0.3)
         
-        marginal_label = self._get_label('marginal_topic_dist')
-        ax.text(0.05, 0.05, f'{marginal_label}\n2%  ●\n5%  ⬤',
-                transform=ax.transAxes, fontsize=11, verticalalignment='bottom',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+        ax.set_title('主题词权重 PCA；圆面积 ∝ 平均主题权重' if self.language == 'zh' else 'PCA of topic-word weights; area ∝ mean topic weight')
+
         plt.tight_layout()
         
         if filename is None:
             filename = '主题间距离图.png' if self.language == 'zh' else 'Intertopic Distance Map.png'
         return self._save_or_show(fig, filename)
     
-    def visualize_topic_word_frequency(
-        self,
-        beta: np.ndarray,
-        topic_words: List[Tuple[int, List[Tuple[str, float]]]],
-        selected_topic: int = 0,
-        n_words: int = 30,
-        filename: str = None
-    ) -> plt.Figure:
-        """
-        Create Top-N Salient Terms chart (right panel of pyLDAvis-style).
-        
-        Args:
-            beta: Topic-word distribution matrix (K x V)
-            topic_words: List of (topic_idx, [(word, prob), ...])
-            selected_topic: Topic to show word frequencies for
-            n_words: Number of top words to display
-            filename: Filename to save. If None, uses language-aware default.
-            
-        Returns:
-            Figure
-        """
-        top_words = []
-        for idx, words in topic_words:
-            if idx == selected_topic:
-                top_words = words[:n_words]
-                break
-        
-        fig, ax = plt.subplots(figsize=(14, 10))
-        
-        if top_words:
-            words_list = [w for w, p in top_words]
-            probs_list = [p for w, p in top_words]
-            
-            overall_freq = np.array(probs_list) * 100
-            y_pos = np.arange(len(words_list))
-            
-            ax.barh(y_pos, overall_freq, color='steelblue', alpha=0.7,
-                    label=self._get_label('overall_term_freq'))
-            topic_freq = np.array(probs_list) * 80
-            ax.barh(y_pos, topic_freq, color='indianred', alpha=0.8,
-                    label=self._get_label('estimated_term_freq'))
-            
-            ax.set_yticks(y_pos)
-            ax.set_yticklabels(words_list, fontsize=11)
-            ax.invert_yaxis()
-            ax.set_xlabel(self._get_label('frequency'), fontsize=14)
-            ax.legend(loc='lower right', fontsize=11)
-        
-        plt.tight_layout()
-        
-        if filename is None:
-            filename = '最显著词汇.png' if self.language == 'zh' else 'Top Salient Terms.png'
-        return self._save_or_show(fig, filename)
+    def visualize_topic_word_frequency(self, beta, topic_words, selected_topic=0, n_words=30, filename=None):
+        """Only actual exported weights; no fabricated corpus counts."""
+        words = topic_words[selected_topic][1][:n_words]
+        fig, ax = plt.subplots(figsize=(5.2, max(3, len(words)*.19)))
+        ax.barh(range(len(words)), [float(p) for w,p in words], color=COLORS[selected_topic % len(COLORS)], height=.55)
+        for i, (_, value) in enumerate(words):
+            ax.text(1.01, i, f'{value:.4g}', transform=ax.get_yaxis_transform(), va='center', fontsize=7)
+        ax.spines['left'].set_visible(False); ax.tick_params(axis='y',length=0)
+        ax.set_yticks(range(len(words)), [w for w,p in words]); ax.invert_yaxis()
+        ax.set_xlabel('导出的主题词权重' if self.language == 'zh' else 'Exported topic-word weight')
+        ax.set_title(f'T{selected_topic+1}')
+        fig.tight_layout()
+        return self._save_or_show(fig, filename or ('最显著词汇.png' if self.language == 'zh' else 'Top Salient Terms.png'))
     
     def visualize_pyldavis_style(
         self,
@@ -1176,8 +1042,8 @@ def generate_pyldavis_visualization(
     bow_matrix,
     vocab: List[str],
     output_path: str,
-    mds: str = 'tsne',
-    sort_topics: bool = True,
+    mds: str = 'pcoa',
+    sort_topics: bool = False,
     R: int = 30
 ) -> Optional[str]:
     """
@@ -1204,66 +1070,29 @@ def generate_pyldavis_visualization(
     
     from scipy import sparse
     
-    # Convert sparse matrix to dense if needed
-    if sparse.issparse(bow_matrix):
-        bow_dense = bow_matrix.toarray()
-    else:
-        bow_dense = np.asarray(bow_matrix)
-    
-    # Ensure arrays are float64
-    theta = np.asarray(theta, dtype=np.float64)
-    beta = np.asarray(beta, dtype=np.float64)
-    
-    # Handle NaN/Inf values
-    theta = np.nan_to_num(theta, nan=0.0, posinf=0.0, neginf=0.0)
-    beta = np.nan_to_num(beta, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Filter out zero-variance topics (e.g., HDP may have empty topics)
-    topic_sums = theta.sum(axis=0)
-    valid_topics = topic_sums > 1e-10
-    n_valid = valid_topics.sum()
-    
-    if n_valid < 2:
-        logger.warning(f"Only {n_valid} valid topics, cannot generate pyLDAvis")
-        return None
-    
-    if n_valid < theta.shape[1]:
-        logger.info(f"Filtering {theta.shape[1] - n_valid} empty topics for pyLDAvis")
-        theta = theta[:, valid_topics]
-        beta = beta[valid_topics, :]
-    
-    # Normalize theta to ensure each row sums to 1 (required by pyLDAvis)
-    theta_row_sums = theta.sum(axis=1, keepdims=True)
-    
-    # Handle documents with zero probability across all topics
-    # Assign uniform distribution to such documents
-    zero_rows = (theta_row_sums.flatten() < 1e-10)
-    if zero_rows.any():
-        logger.info(f"Assigning uniform distribution to {zero_rows.sum()} zero-probability documents")
-        theta[zero_rows, :] = 1.0 / theta.shape[1]
-        theta_row_sums = theta.sum(axis=1, keepdims=True)
-    
-    theta = theta / theta_row_sums
-    
-    # Normalize beta to ensure each row sums to 1
-    beta_row_sums = beta.sum(axis=1, keepdims=True)
-    beta_row_sums[beta_row_sums == 0] = 1  # Avoid division by zero
-    beta_normalized = beta / beta_row_sums
-    
-    # Document lengths
-    doc_lengths = bow_dense.sum(axis=1).astype(np.int64)
-    
-    # Term frequency across corpus
-    term_frequency = bow_dense.sum(axis=0).astype(np.int64)
-    
-    # Filter out zero-frequency terms
-    nonzero_mask = term_frequency > 0
-    if not nonzero_mask.all():
-        logger.info(f"Filtering {(~nonzero_mask).sum()} zero-frequency terms")
-        term_frequency = term_frequency[nonzero_mask]
-        beta_normalized = beta_normalized[:, nonzero_mask]
-        vocab = [v for v, m in zip(vocab, nonzero_mask) if m]
-    
+    if bow_matrix is None:
+        raise ValueError('pyLDAvis requires observed aligned BOW counts')
+    theta = np.asarray(theta, dtype=float).copy()
+    beta = np.asarray(beta, dtype=float).copy()
+    if bow_matrix.shape != (len(theta), len(vocab)) or beta.shape != (theta.shape[1], len(vocab)):
+        raise ValueError('pyLDAvis matrix axes are not aligned')
+    if not np.isfinite(theta).all() or not np.isfinite(beta).all() or (theta < 0).any() or (beta < 0).any():
+        raise ValueError('pyLDAvis requires finite nonnegative probabilities')
+    if (theta.sum(axis=1) <= 0).any() or (beta.sum(axis=1) <= 0).any():
+        raise ValueError('pyLDAvis cannot invent distributions for empty rows')
+    theta /= theta.sum(axis=1, keepdims=True)
+    beta_normalized = beta / beta.sum(axis=1, keepdims=True)
+    doc_lengths = np.asarray(bow_matrix.sum(axis=1)).ravel()
+    term_frequency = np.asarray(bow_matrix.sum(axis=0)).ravel()
+    positive = doc_lengths > 0
+    if not positive.any():
+        raise ValueError('pyLDAvis requires at least one nonempty document')
+    scope = {'inputDocuments': len(theta), 'displayedDocuments': int(positive.sum()),
+             'excludedEmptyBowRows': np.flatnonzero(~positive).tolist(),
+             'note': 'Interactive view excludes zero-token documents only; global figures retain all model rows. Original matrices unchanged.'}
+    theta = theta[positive]
+    doc_lengths = doc_lengths[positive]
+
     try:
         # Create pyLDAvis visualization data
         vis_data = pyLDAvis.prepare(
@@ -1273,13 +1102,23 @@ def generate_pyldavis_visualization(
             vocab=vocab,
             term_frequency=term_frequency,
             mds=mds,
+            n_jobs=1,
             sort_topics=sort_topics,
             R=R
         )
         
         # Save to HTML
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        pyLDAvis.save_html(vis_data, output_path)
+        from pyLDAvis import urls
+        page = pyLDAvis.prepared_data_to_html(vis_data, template_type='simple')
+        for url, local in [(urls.D3_URL, urls.D3_LOCAL), (urls.LDAVIS_URL, urls.LDAVIS_LOCAL)]:
+            script = Path(local).read_text(encoding='utf-8')
+            page = page.replace(f'<script type="text/javascript" src="{url}"></script>', f'<script>{script}</script>')
+        page = page.replace(f'<link rel="stylesheet" type="text/css" href="{urls.LDAVIS_CSS_URL}">',
+                            '<style>' + Path(urls.LDAVIS_CSS_LOCAL).read_text() + '</style>')
+        notice = f'<p>Documents: {scope["displayedDocuments"]:,}/{scope["inputDocuments"]:,}; empty BOW rows excluded only in this view. Topic IDs retain model order.</p>'
+        Path(output_path).write_text('<!doctype html><meta charset="utf-8">'+notice+page, encoding='utf-8')
+        Path(output_path).with_suffix('.scope.json').write_text(json.dumps(scope,indent=2),encoding='utf-8')
         logger.info(f"pyLDAvis visualization saved to {output_path}")
         
         return output_path
@@ -1294,7 +1133,7 @@ def generate_pyldavis_notebook(
     beta: np.ndarray,
     bow_matrix,
     vocab: List[str],
-    mds: str = 'tsne'
+    mds: str = 'pcoa'
 ):
     """
     Generate pyLDAvis visualization for Jupyter notebook display.
@@ -1344,6 +1183,7 @@ def generate_pyldavis_notebook(
             vocab=vocab,
             term_frequency=term_frequency,
             mds=mds,
+            n_jobs=1,
             sort_topics=True
         )
         return vis_data

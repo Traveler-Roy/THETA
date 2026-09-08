@@ -1035,7 +1035,8 @@ class BaselineTrainer:
             num_workers=4,
             pin_memory=True,
             persistent_workers=True,
-            prefetch_factor=2
+            prefetch_factor=2,
+            drop_last=False
         )
         val_loader = create_dataloader(
             val_dataset, 
@@ -1044,7 +1045,8 @@ class BaselineTrainer:
             num_workers=4,
             pin_memory=True,
             persistent_workers=True,
-            prefetch_factor=2
+            prefetch_factor=2,
+            drop_last=False
         )
         
         # Create model
@@ -1127,7 +1129,7 @@ class BaselineTrainer:
             
             if val_loss < best_loss:
                 best_loss = val_loss
-                best_model_state = model.state_dict().copy()
+                best_model_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
             
             if (epoch + 1) % 10 == 0:
                 print(f"  Epoch {epoch+1}/{epochs}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
@@ -1669,6 +1671,12 @@ class BaselineTrainer:
                     theta_matrix[i, t] = 1.0
             theta = theta_matrix
         
+        # Save the actual assignments before keyword export, preserving outlier -1.
+        model_dir = os.path.join(self.output_dir, 'bertopic')
+        os.makedirs(model_dir, exist_ok=True)
+        np.save(os.path.join(model_dir, 'document_topics.npy'), np.asarray(model.get_topics(), dtype=np.int64))
+        np.save(os.path.join(model_dir, f'theta_k{actual_topics}.npy'), theta)
+
         # Get beta (topic-word distribution)
         beta = model.get_beta()
         
@@ -1688,11 +1696,20 @@ class BaselineTrainer:
         with open(os.path.join(model_dir, f'topic_words_k{actual_topics}.json'), 'w', encoding='utf-8') as f:
             json.dump(topic_words, f, ensure_ascii=False, indent=2)
         
+        # The fitted BERTopic vectorizer owns a different vocabulary from BOW preprocessing.
+        vocab = model._beta_vocab
+        with open(os.path.join(model_dir, 'vocab.json'), 'w', encoding='utf-8') as handle:
+            json.dump(vocab, handle, ensure_ascii=False)
+        vectorizer = model.model.vectorizer_model
+        counts = vectorizer.transform(texts)
+        sp.save_npz(os.path.join(model_dir, 'bow_matrix.npz'),
+                    counts[:, [vectorizer.vocabulary_[word] for word in vocab]].tocsr())
+
         # Save info
         info = {
             'model': 'bertopic',
             'actual_num_topics': actual_topics,
-            'vocab_size': len(self.vocab),
+            'vocab_size': len(vocab),
             'train_time': train_time,
             'outlier_count': model.outlier_count,
             'n_neighbors': n_neighbors,

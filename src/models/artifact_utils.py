@@ -234,3 +234,32 @@ def adapter_signature(directory) -> Dict:
         (config_filename, weight_filename),
         "theta.lora-adapter",
     )
+
+
+def find_topic_matrix_pair(directory, num_topics=None):
+    """Resolve one experiment's original pair, including inferred K and nested exports."""
+    import re
+    root = Path(directory)
+    pairs = []
+    for theta in root.rglob('theta*.npy'):
+        if theta.name != 'theta.npy' and not re.fullmatch(r'theta_k\d+\.npy', theta.name):
+            continue
+        beta = theta.with_name(theta.name.replace('theta', 'beta', 1))
+        if beta.is_file(): pairs.append((theta, beta))
+    exact = [pair for pair in pairs if pair[0].name == f'theta_k{num_topics}.npy'] if num_topics is not None else []
+    selected = exact or pairs
+    if len(selected) != 1:
+        raise ValueError(f'Expected one theta/beta pair in {root}; found {len(selected)}. Select a single experiment.')
+    return selected[0]
+
+
+def validate_topic_matrices(theta, beta, vocab, model):
+    import numpy as np
+    if theta.ndim != 2 or beta.ndim != 2 or not theta.size or not beta.size:
+        raise ValueError('Empty or non-matrix topic results')
+    if theta.shape[1] != beta.shape[0] or beta.shape[1] != len(vocab):
+        raise ValueError('theta/beta/vocabulary axes do not match')
+    if not np.isfinite(theta).all() or not np.isfinite(beta).all() or (beta < 0).any():
+        raise ValueError('Non-finite or negative topic-word results')
+    if model != 'nvdm' and (theta < 0).any(): raise ValueError('Negative topic probabilities')
+    if (beta.sum(axis=1) <= 0).any(): raise ValueError('Topics have empty word distributions')
