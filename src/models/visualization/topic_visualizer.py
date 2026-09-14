@@ -842,6 +842,10 @@ class TopicVisualizer:
             if len(ids): label_y -= (label_y.mean()-topic_coords[ids, 1].mean())
             for i, y in zip(ids, label_y):
                 x = topic_coords[i,0]+side*.10*xspan
+                # Degenerate PCA axes can have a span far below the label spacing.
+                # Include annotation anchors in the view limits before tight export;
+                # otherwise the labels produce an enormous off-canvas bounding box.
+                ax.update_datalim([(x, y)])
                 ax.annotate(f'T{i+1}', topic_coords[i], xytext=(x,y), color=colors[i], weight='bold',
                             ha='right' if side<0 else 'left', va='center',
                             arrowprops=dict(arrowstyle='-',color='#9BA3A8',lw=.65), annotation_clip=False)

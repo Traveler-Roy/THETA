@@ -1,0 +1,21 @@
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    THETA_PROJECT_ROOT=/opt/theta \
+    WORKER_RESOURCE_CLASS=gpu \
+    WORKER_JOB_ROOT=/var/lib/theta-worker/jobs
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential autoconf automake libtool gcc g++ libgomp1 fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/models/requirements.txt /tmp/model-requirements.txt
+COPY trainning/worker/requirements.txt /tmp/worker-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/model-requirements.txt -r /tmp/worker-requirements.txt
+
+COPY src /opt/theta/src
+COPY trainning/worker/*.py /opt/theta/trainning/worker/
+WORKDIR /opt/theta/trainning
+
+CMD ["python", "-m", "worker"]

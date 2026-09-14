@@ -157,7 +157,10 @@ def export_manifest(output_dir, dpi, formats, data=None):
         preview = next((f for f in variants if f.endswith(('.png', '.svg'))), None)
         links = ' · '.join(f'<a href="{quote(f)}" download>{Path(f).suffix[1:].upper()}</a>' for f in variants)
         picture = f'<a href="{quote(preview)}"><img loading="lazy" src="{quote(preview)}" alt="{html.escape(stem)}"></a>' if preview else ''
-        cards.append(f'<article><h2>{html.escape(labels.get(Path(stem).name, ('矩形词云拼图 · '+Path(stem).name.rsplit('_',1)[-1]) if Path(stem).name.startswith('topic_wordcloud_grid_') else stem))}</h2>{picture}<p>{links}</p></article>')
+        name = Path(stem).name
+        fallback = '矩形词云拼图 · ' + name.rsplit('_', 1)[-1] if name.startswith('topic_wordcloud_grid_') else stem
+        title = html.escape(labels.get(name, fallback))
+        cards.append(f'<article><h2>{title}</h2>{picture}<p>{links}</p></article>')
     auxiliary = ' · '.join(f'<a href="{quote(f)}">{html.escape(f)}</a>' for f in files if f.endswith(('.csv', '.html')))
     scope = html.escape(data.get('plot_scope') or '全局图使用全部模型文档；时序图仅使用可验证的有效日期。')
     (root / 'index.html').write_text('''<!doctype html><html lang="zh"><meta charset="utf-8">

@@ -689,3 +689,7 @@ Apache-2.0
 [Publication figures and high-resolution export](docs/publication-visualization.md)
 
 [Bilingual figure atlas examples](docs/examples/figure-atlas/README.md)
+
+## Agent, CLI and local workbench
+
+The open-source edition now includes the conversational Agent, free statistical analysis, a CLI, and the existing web workbench with direct access (no account or simulated user). See the [startup guide](docs/opensource-agent.md), [Agent documentation](agent/README.md), and [bundled Data Viz skill](agent/docs/data-viz-skill.md).

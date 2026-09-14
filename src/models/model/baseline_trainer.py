@@ -183,6 +183,11 @@ class BaselineTrainer:
         else:
             raise FileNotFoundError(f"Vocab not found: {vocab_path}")
         
+        texts_path = workspace / 'texts.json'
+        if texts_path.is_file():
+            self.texts = json.loads(texts_path.read_text(encoding='utf-8'))
+            if len(self.texts) != self.bow_matrix.shape[0]: raise ValueError('Prepared texts and BOW rows do not match')
+
         # Load SBERT embeddings (for CTM, BERTopic)
         sbert_path = workspace / 'sbert_embeddings.npy'
         if sbert_path.exists():
@@ -1215,6 +1220,8 @@ class BaselineTrainer:
         # Save info
         info = {
             'model': 'dtm',
+            'implementation': 'theta_neural_temporal_vae',
+            'implementation_note': 'Repository neural temporal VAE; not the original Blei-Lafferty variational Kalman implementation.',
             'num_topics': self.num_topics,
             'vocab_size': len(self.vocab),
             'train_time': train_time,
@@ -1348,6 +1355,10 @@ class BaselineTrainer:
         # Get results
         theta = model.get_theta()
         beta = model.get_beta()
+        topic_words = {
+            f"topic_{topic_id}": [word for word, _ in model.get_topic_words(topic_id, top_n=10, vocab=self.vocab)]
+            for topic_id in range(self.num_topics)
+        }
         
         # Save results
         model_dir = os.path.join(self.output_dir, 'stm', 'model')
@@ -1356,8 +1367,15 @@ class BaselineTrainer:
         np.save(os.path.join(model_dir, f'theta_k{self.num_topics}.npy'), theta)
         np.save(os.path.join(model_dir, f'beta_k{self.num_topics}.npy'), beta)
 
+        # Core interpretation artifacts must also exist when evaluation is skipped.
+        with open(os.path.join(model_dir, f'topic_words_k{self.num_topics}.json'), 'w', encoding='utf-8') as f:
+            json.dump(topic_words, f, ensure_ascii=False, indent=2)
+
         # Save covariate effects for visualization
         covariate_info = {
+            'implementation': 'r_stm' if model._use_r else 'theta_python_logistic_normal_approximation',
+            'coefficient_semantics': 'Reference-topic log odds; estimates without standard errors or significance tests.',
+            'reference_topic_index': self.num_topics - 1 if not model._use_r else None,
             'covariate_names': covariate_names or [],
             'num_covariates': covariates.shape[1] if covariates is not None else 0,
             'num_topics': self.num_topics,
@@ -1395,6 +1413,7 @@ class BaselineTrainer:
             'model': model,
             'theta': theta,
             'beta': beta,
+            'topic_words': topic_words,
             'train_time': train_time,
             'covariate_effects': effects
         }
@@ -1671,11 +1690,14 @@ class BaselineTrainer:
                     theta_matrix[i, t] = 1.0
             theta = theta_matrix
         
-        # Save the actual assignments before keyword export, preserving outlier -1.
+        # Preserve the fitted model and exact assignments before keyword/metadata export.
+        # A later export error must not destroy the expensive clustering result.
         model_dir = os.path.join(self.output_dir, 'bertopic')
         os.makedirs(model_dir, exist_ok=True)
-        np.save(os.path.join(model_dir, 'document_topics.npy'), np.asarray(model.get_topics(), dtype=np.int64))
         np.save(os.path.join(model_dir, f'theta_k{actual_topics}.npy'), theta)
+        np.save(os.path.join(model_dir, 'document_topics.npy'), np.asarray(model.get_topics(), dtype=np.int64))
+        import joblib
+        joblib.dump(model, os.path.join(model_dir, 'model.joblib'))
 
         # Get beta (topic-word distribution)
         beta = model.get_beta()
@@ -1686,13 +1708,9 @@ class BaselineTrainer:
             words = model.get_topic_words(k, top_n=20)
             topic_words[f'topic_{k}'] = [w for w, _ in words]
         
-        # Save results
-        model_dir = os.path.join(self.output_dir, 'bertopic')
-        os.makedirs(model_dir, exist_ok=True)
-        
-        np.save(os.path.join(model_dir, f'theta_k{actual_topics}.npy'), theta)
+        # Complete the export without rewriting the original document rows.
         np.save(os.path.join(model_dir, f'beta_k{actual_topics}.npy'), beta)
-        
+
         with open(os.path.join(model_dir, f'topic_words_k{actual_topics}.json'), 'w', encoding='utf-8') as f:
             json.dump(topic_words, f, ensure_ascii=False, indent=2)
         

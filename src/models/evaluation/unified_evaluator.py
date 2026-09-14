@@ -102,132 +102,44 @@ class UnifiedEvaluator:
         print(f"Computing 7 Core Metrics for {self.model_name} on {self.dataset}")
         print(f"{'='*60}")
         
-        # 1. TD (Topic Diversity)
-        print("  [1/7] Computing TD (Topic Diversity)...")
-        td = compute_topic_diversity(self.beta, top_k=25)
-        self.metrics['TD'] = td
-        
-        # 2. iRBO (Inverse Rank-Biased Overlap)
-        print("  [2/7] Computing iRBO (Inverse Rank-Biased Overlap)...")
-        irbo = compute_topic_diversity_inverted_rbo(self.beta, top_k=25)
-        self.metrics['iRBO'] = irbo
-        
-        # 3. NPMI (Normalized PMI)
-        print("  [3/7] Computing NPMI (Normalized PMI)...")
-        npmi_avg, npmi_per_topic = compute_topic_coherence_npmi(
-            self.beta, self.bow_matrix, top_k=top_k
-        )
-        self.metrics['NPMI'] = npmi_avg
-        self.metrics['NPMI_per_topic'] = npmi_per_topic
-        
-        # 4. C_V (C_V Coherence)
-        print("  [4/7] Computing C_V (C_V Coherence)...")
-        try:
-            cv_avg, cv_per_topic = compute_topic_coherence_cv(
-                self.beta, self.bow_matrix, top_k=top_k
-            )
-            self.metrics['C_V'] = cv_avg
-            self.metrics['C_V_per_topic'] = cv_per_topic
-        except Exception as e:
-            print(f"    Warning: C_V computation failed, using fallback: {e}")
-            # Fallback: use NPMI as approximation
-            self.metrics['C_V'] = npmi_avg
-            self.metrics['C_V_per_topic'] = npmi_per_topic
-        
-        # 5. UMass (UMass Coherence)
-        print("  [5/7] Computing UMass (UMass Coherence)...")
-        try:
-            umass_avg, umass_per_topic = compute_topic_coherence_umass(
-                self.beta, self.bow_matrix, top_k=top_k
-            )
-            self.metrics['UMass'] = umass_avg
-            self.metrics['UMass_per_topic'] = umass_per_topic
-        except Exception as e:
-            print(f"    Warning: UMass computation failed, using fallback: {e}")
-            self.metrics['UMass'] = 0.0
-            self.metrics['UMass_per_topic'] = [0.0] * self.num_topics
-        
-        # 6. Exclusivity (Topic Exclusivity)
-        print("  [6/7] Computing Exclusivity (Topic Exclusivity)...")
-        try:
-            excl_avg, excl_per_topic = compute_topic_exclusivity(self.beta, top_k=top_k)
-            self.metrics['Exclusivity'] = excl_avg
-            self.metrics['Exclusivity_per_topic'] = excl_per_topic
-        except Exception as e:
-            print(f"    Warning: Exclusivity computation failed, using fallback: {e}")
-            # Fallback: compute simple exclusivity based on word overlap
-            self.metrics['Exclusivity'] = td  # Use TD as approximation
-            self.metrics['Exclusivity_per_topic'] = [td] * self.num_topics
-        
-        # 7. PPL (Perplexity)
-        print("  [7/7] Computing PPL (Perplexity)...")
-        try:
-            ppl = compute_perplexity(self.beta, self.theta, self.bow_matrix)
-            self.metrics['PPL'] = ppl
-        except Exception as e:
-            print(f"    Warning: Perplexity computation failed, using fallback: {e}")
-            # Fallback: estimate perplexity from reconstruction
-            self.metrics['PPL'] = self._estimate_perplexity_fallback()
-        
-        # Compute topic significance for visualization (NOT part of 7 core metrics)
-        print("  [Extra] Computing Topic Significance (for visualization only)...")
-        try:
+        # Reuse native metrics; absence or inapplicability is never replaced with another metric.
+        self.metrics = {}
+        unavailable = {}
+        metrics = [
+            ('TD', lambda: compute_topic_diversity(self.beta, top_k=25)),
+            ('iRBO', lambda: compute_topic_diversity_inverted_rbo(self.beta, top_k=25)),
+            ('NPMI', lambda: compute_topic_coherence_npmi(self.beta, self.bow_matrix, top_k=top_k)),
+            ('C_V', lambda: compute_topic_coherence_cv(self.beta, self.bow_matrix, top_k=top_k)),
+            ('UMass', lambda: compute_topic_coherence_umass(self.beta, self.bow_matrix, top_k=top_k)),
+            ('Exclusivity', lambda: compute_topic_exclusivity(self.beta, top_k=top_k)),
+        ]
+        if self.model_name.lower() not in {'nvdm', 'bertopic', 'dtm'}:
+            metrics.append(('PPL', lambda: compute_perplexity(self.beta, self.theta, self.bow_matrix)))
+        else:
+            unavailable['PPL'] = {
+                'nvdm': 'NVDM latent coordinates are not document-topic probabilities.',
+                'bertopic': 'BERTopic membership and c-TF-IDF weights are not generative word probabilities.',
+                'dtm': 'DTM PPL requires the correct time-specific beta for each document; the shared evaluator has only the last-slice beta.',
+            }[self.model_name.lower()]
+        for name, compute in metrics:
+            try:
+                value = compute()
+                average, per_topic = value if isinstance(value, tuple) else (value, None)
+                if not np.isfinite(average) or per_topic is not None and not np.isfinite(per_topic).all():
+                    raise ValueError('non-finite metric')
+                self.metrics[name] = float(average)
+                if per_topic is not None: self.metrics[name + '_per_topic'] = np.asarray(per_topic).tolist()
+                print(f"  {name}: {average:.4f}")
+            except Exception as error:
+                unavailable[name] = str(error)
+                print(f"  [Skip] {name}: {error}")
+        if self.model_name.lower() not in {'nvdm', 'bertopic'}:
             topic_sizes = self.theta.mean(axis=0)
             self.metrics['Significance_per_topic'] = topic_sizes.tolist()
-            self.metrics['Significance'] = float(np.std(topic_sizes))  # Variance as significance measure
-        except Exception as e:
-            print(f"    Warning: Significance computation failed: {e}")
-            self.metrics['Significance_per_topic'] = [1.0 / self.num_topics] * self.num_topics
-            self.metrics['Significance'] = 0.0
-        
-        # Print results summary
-        print(f"\n  {'='*50}")
-        print(f"  7 Core Metrics Results:")
-        print(f"  {'='*50}")
-        print(f"    1. TD:          {self.metrics['TD']:.4f}")
-        print(f"    2. iRBO:        {self.metrics['iRBO']:.4f}")
-        print(f"    3. NPMI:        {self.metrics['NPMI']:.4f}")
-        print(f"    4. C_V:         {self.metrics['C_V']:.4f}")
-        print(f"    5. UMass:       {self.metrics['UMass']:.4f}")
-        print(f"    6. Exclusivity: {self.metrics['Exclusivity']:.4f}")
-        print(f"    7. PPL:         {self.metrics['PPL']:.2f}")
-        print(f"  {'='*50}")
-        print(f"  [Visualization Data] Significance: {self.metrics['Significance']:.4f}")
-        
+            self.metrics['Significance'] = float(np.std(topic_sizes))
+        self.metrics['unavailable'] = unavailable
         return self.metrics
-    
-    def _estimate_perplexity_fallback(self) -> float:
-        """
-        Fallback perplexity estimation for models that don't natively support it.
-        Uses reconstruction-based estimation.
-        
-        Returns:
-            Estimated perplexity value
-        """
-        try:
-            # Reconstruct document-word distribution
-            doc_word_probs = self.theta @ self.beta
-            doc_word_probs = np.clip(doc_word_probs, 1e-10, 1.0)
-            
-            # Normalize
-            doc_word_probs = doc_word_probs / doc_word_probs.sum(axis=1, keepdims=True)
-            
-            # Get BOW as dense
-            if sp.issparse(self.bow_matrix):
-                bow = self.bow_matrix.toarray()
-            else:
-                bow = np.asarray(self.bow_matrix)
-            
-            # Compute log-likelihood
-            log_likelihood = np.sum(bow * np.log(doc_word_probs + 1e-10))
-            total_words = np.sum(bow)
-            
-            # Perplexity
-            ppl = np.exp(-log_likelihood / max(total_words, 1))
-            return float(min(ppl, 1e6))  # Cap at 1M to avoid overflow
-        except:
-            return 1000.0  # Default fallback value
-    
+
     def get_metrics_dict(self) -> Dict[str, Any]:
         """
         Get the standardized 7-metric result dictionary.
@@ -242,37 +154,8 @@ class UnifiedEvaluator:
             - Exclusivity: Topic Exclusivity
             - PPL: Perplexity
         """
-        # Ensure all 7 metrics are present
-        core_metrics = {
-            'TD': self.metrics.get('TD', 0.0),
-            'iRBO': self.metrics.get('iRBO', 0.0),
-            'NPMI': self.metrics.get('NPMI', 0.0),
-            'C_V': self.metrics.get('C_V', 0.0),
-            'UMass': self.metrics.get('UMass', 0.0),
-            'Exclusivity': self.metrics.get('Exclusivity', 0.0),
-            'PPL': self.metrics.get('PPL', 1000.0),
-        }
-        
-        # Add per-topic metrics
-        per_topic_metrics = {
-            'NPMI_per_topic': self.metrics.get('NPMI_per_topic', []),
-            'C_V_per_topic': self.metrics.get('C_V_per_topic', []),
-            'UMass_per_topic': self.metrics.get('UMass_per_topic', []),
-            'Exclusivity_per_topic': self.metrics.get('Exclusivity_per_topic', []),
-            # Significance for visualization only (not part of 7 core metrics)
-            'Significance': self.metrics.get('Significance', 0.0),
-            'Significance_per_topic': self.metrics.get('Significance_per_topic', []),
-        }
-        
-        # Add metadata
-        metadata = {
-            'model_name': self.model_name,
-            'dataset': self.dataset,
-            'num_topics': self.num_topics,
-        }
-        
-        return {**core_metrics, **per_topic_metrics, **metadata}
-    
+        return dict(self.metrics)
+
     def save_metrics(self, filename: Optional[str] = None) -> str:
         """
         Save evaluation metrics to JSON file.

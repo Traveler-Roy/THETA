@@ -234,3 +234,19 @@ models/*
 
 # IDE
 CLAUDE.md
+
+# Local agent worktrees, dependencies, runtime state, and private configuration
+.local/
+node_modules/
+.pnpm-store/
+.next/
+.theta_agent/
+.env.*
+!.env.example
+.venv-*/
+.DS_Store
+*.tsbuildinfo
+
+# Frontend source is not a Python environment library.
+!theta.code-soul.com/lib/
+!theta.code-soul.com/lib/**

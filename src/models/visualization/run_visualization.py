@@ -974,39 +974,14 @@ def _run_stm_specific_visualizations(data, output_dir, language='zh', dpi=300, f
         except Exception as e:
             print(f"  ⚠ gamma: {e}")
 
-    # Chart 6: ANOVA F 检验显著性
-    if sum((covariates[:, 0].astype(int) == v).sum() >= 2 for v in unique_vals) < 2:
-        print('[SKIP] ANOVA requires two groups with at least two observations each')
-        return
-    try:
-        from scipy import stats
-        f_stats, p_vals = [], []
-        for k in range(K):
-            groups = [theta[covariates[:, 0].astype(int) == v, k] for v in unique_vals if (covariates[:, 0].astype(int) == v).sum() >= 2]
-            if len(groups) >= 2:
-                f, p = stats.f_oneway(*groups)
-                f_stats.append(f); p_vals.append(p)
-            else:
-                raise ValueError('ANOVA needs at least two groups with two observations each')
-        f_stats, p_vals = np.array(f_stats), np.array(p_vals)
-        if not np.isfinite(p_vals).all() or not np.isfinite(f_stats).all():
-            raise ValueError('ANOVA undefined for constant/insufficient groups; no inferential chart')
-        order = np.argsort(p_vals)
-        q_vals = np.empty(K)
-        q_vals[order] = np.minimum.accumulate((p_vals[order]*K/np.arange(1,K+1))[::-1])[::-1].clip(0,1)
-        pd.DataFrame({'topic_id': np.arange(K)+1, 'F': f_stats, 'p': p_vals, 'q_BH': q_vals}).to_csv(global_dir/'exploratory_anova.csv',index=False)
-        fig, ax = plt.subplots(figsize=(6.4,max(2.6,K*.3)))
-        ax.barh(range(K),f_stats,color=[COLORS[1] if p<.05 else '#B5C6D1' for p in q_vals],height=.55)
-        ax.set_yticks(range(K),topic_labels);ax.invert_yaxis();ax.set_xlabel('ANOVA F')
-        ax.set_title('探索性组间差异（ANOVA；橙色 BH-FDR q<0.05）' if zh else 'Exploratory group differences (ANOVA; BH-FDR q<0.05)', fontsize=10, fontweight='bold')
-        ax.grid(axis='y', alpha=0.3)
-        for i, (f, p) in enumerate(zip(f_stats, q_vals)):
-            ax.text(1.01,i,f'q={p:.3g}',transform=ax.get_yaxis_transform(),ha='left',va='center',fontsize=8)
-        plt.tight_layout()
-        save_figure(plt.gcf(), global_dir / ('协变量效应显著性检验.png' if zh else 'covariate_effect_anova.png'), dpi=dpi, formats=formats, bbox_inches='tight', facecolor='white')
-        plt.close(); print(f"  ✓ 协变量效应显著性检验.png")
-    except Exception as e:
-        print(f"  ⚠ anova: {e}")
+    # theta was fitted using these same covariates; a post-fit one-way ANOVA
+    # treats estimated dependent quantities as independently observed outcomes.
+    # Keep descriptive evidence and leave inferential uncertainty to a valid STM procedure.
+    group_table = pd.DataFrame(mean_theta, columns=[f'T{k+1}' for k in range(K)])
+    group_table.insert(0, 'group', cov_labels)
+    group_table.insert(1, 'n_documents', [int((covariates[:, 0].astype(int) == v).sum()) for v in unique_vals])
+    group_table.to_csv(global_dir / 'stm_group_topic_means.csv', index=False)
+    print('[SKIP] STM post-fit ANOVA: these covariates already entered topic estimation; no independent effect test or model uncertainty is available. Descriptive group means and Gamma estimates retained.')
 
 
 def _run_dtm_specific_visualizations(data, output_dir, language='en', dpi=300, formats=('png', 'pdf', 'svg')):

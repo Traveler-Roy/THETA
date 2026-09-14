@@ -1031,7 +1031,9 @@ def train_two_stage(
 
     # Return results
     return {
-        'model': model_stage2,
+        'model': model_stage2.module if use_ddp else model_stage2,
+        'doc_embeddings': new_doc_embeddings,
+        'label_encoder': label_encoder,
         'history': {
             'stage1': history_stage1,
             'stage2': history_stage2
@@ -1512,6 +1514,7 @@ def train_etm(
 
     return {
         'model': base_model,
+        'label_encoder': label_encoder,
         'history': history,
         'best_val_loss': best_val_loss,
         'test_loss': test_loss
@@ -1637,7 +1640,8 @@ def save_results(
     config: PipelineConfig,
     logger: logging.Logger,
     device: torch.device,
-    timestamps: Optional[np.ndarray] = None
+    timestamps: Optional[np.ndarray] = None,
+    label_encoder=None
 ) -> str:
     """Save training results to result/{dataset}/{mode}/ subdirectories"""
     # Create all output directories
@@ -1678,6 +1682,9 @@ def save_results(
         # Get topic words
         topic_words = model.get_topic_words(top_k=20, vocab=vocab)
 
+    from artifact_utils import validate_topic_matrices
+    validate_topic_matrices(theta, beta, vocab, 'theta')
+
     # Save model outputs to model_dir (fixed filenames without timestamp)
     np.save(os.path.join(config.model_dir, "theta.npy"), theta)
     np.save(os.path.join(config.model_dir, "beta.npy"), beta)
@@ -1694,13 +1701,17 @@ def save_results(
 
     # Save model weights
     torch.save(model.state_dict(), os.path.join(config.model_dir, "etm_model.pt"))
+    with open(os.path.join(config.model_dir, 'vocab.json'), 'w', encoding='utf-8') as file:
+        json.dump(vocab, file, ensure_ascii=False)
+    from artifact_utils import write_topic_result_manifest
+    write_topic_result_manifest(config.exp_dir, 'theta', theta, beta, vocab)
 
     # Save label mapping for supervised mode (for inference)
     if config.embedding.mode == 'supervised' and label_encoder is not None:
         label_mapping = {
             "index_to_label": {int(i): str(label) for i, label in enumerate(label_encoder.classes_)},
             "label_to_index": {str(label): int(i) for i, label in enumerate(label_encoder.classes_)},
-            "num_classes": int(num_classes)
+            "num_classes": len(label_encoder.classes_)
         }
         label_mapping_path = os.path.join(config.model_dir, "label_mapping.json")
         with open(label_mapping_path, 'w', encoding='utf-8') as f:
@@ -1716,7 +1727,7 @@ def save_results(
     # Save timestamps if available (for temporal analysis)
     if timestamps is not None and len(timestamps) > 0:
         ts_path = os.path.join(config.result_dir, "timestamps.npy")
-        np.save(ts_path, timestamps)
+        np.save(ts_path, np.asarray(timestamps, dtype='datetime64[ns]'))
         logger.info(f"Timestamps saved to {ts_path}")
 
     # Log top words
@@ -2017,9 +2028,9 @@ def run_train(config: PipelineConfig, logger: logging.Logger, local_rank: int = 
     timestamp = run_rank_zero(
         lambda: save_results(
             results['model'], results['history'], vocab,
-            doc_embeddings, bow_matrix, vocab_embeddings,
+            results.get('doc_embeddings', doc_embeddings), bow_matrix, vocab_embeddings,
             config, logger, device,
-            timestamps=timestamps
+            timestamps=timestamps, label_encoder=results.get('label_encoder')
         ),
         use_ddp,
         local_rank,

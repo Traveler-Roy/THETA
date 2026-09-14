@@ -716,6 +716,8 @@ def run_baseline(model_name: str, args) -> Dict[str, Any]:
             result['skip_reason'] = str(e)
             return result
         
+        from artifact_utils import export_baseline_metadata
+        export_baseline_metadata(model_dir, model_name, train_result, trainer)
         result['train_status'] = 'completed'
         result['train_time'] = train_result.get('train_time', 0)
     else:
@@ -725,84 +727,20 @@ def run_baseline(model_name: str, args) -> Dict[str, Any]:
     # === Evaluation ===
     if not args.skip_eval:
         print(f"\n[Evaluating {model_name.upper()}]")
-        # Load BOW and vocab from workspace directory (not data_exp_dir)
-        bow_path = Path(workspace_dir) / 'bow_matrix.npy'
-        vocab_path = Path(workspace_dir) / 'vocab.json'
-        
-        # Determine actual num_topics (HDP/BERTopic may have different actual topics)
-        actual_num_topics = args.num_topics
-        if model_name in ('hdp', 'bertopic'):
-            if train_result and 'actual_num_topics' in train_result:
-                actual_num_topics = train_result['actual_num_topics']
-                print(f"  Using {model_name.upper()} actual topics: {actual_num_topics}")
-            else:
-                # If skip-train, try to find existing theta file to get actual K
-                import glob
-                search_dirs = [
-                    str(model_dir / model_name / 'theta_k*.npy'),
-                    str(model_dir / model_name / 'model' / 'theta_k*.npy'),
-                ]
-                theta_files = []
-                for pattern in search_dirs:
-                    theta_files = glob.glob(pattern)
-                    if theta_files:
-                        break
-                if theta_files:
-                    # Extract K from filename like theta_k50.npy
-                    import re
-                    match = re.search(r'theta_k(\d+)\.npy', theta_files[0])
-                    if match:
-                        actual_num_topics = int(match.group(1))
-                        print(f"  Detected {model_name.upper()} topics from file: {actual_num_topics}")
-        
-        # Check multiple possible paths for theta/beta (different models save to different locations)
-        # Path priority:
-        # 1. model_dir/{model_name}/theta_k{K}.npy (standard)
-        # 2. model_dir/{model_name}_zeroshot/theta_k{K}.npy (CTM zeroshot)
-        # 3. model_dir/{model_name}_combined/theta_k{K}.npy (CTM combined)
-        # 4. model_dir/theta_k{K}.npy (direct)
-        # 5. model_dir/{model_name}/model/theta_k{K}.npy (HDP/neural)
-        
-        theta_path = model_dir / model_name / f'theta_k{actual_num_topics}.npy'
-        beta_path = model_dir / model_name / f'beta_k{actual_num_topics}.npy'
-        
-        # CTM saves to ctm_zeroshot/ or ctm_combined/
-        if not theta_path.exists() and model_name == 'ctm':
-            for suffix in ['zeroshot', 'combined']:
-                ctm_path = model_dir / f'ctm_{suffix}' / f'theta_k{actual_num_topics}.npy'
-                if ctm_path.exists():
-                    theta_path = ctm_path
-                    beta_path = model_dir / f'ctm_{suffix}' / f'beta_k{actual_num_topics}.npy'
-                    break
-        
-        # If not found, check directly in model_dir
-        if not theta_path.exists():
-            theta_path = model_dir / f'theta_k{actual_num_topics}.npy'
-            beta_path = model_dir / f'beta_k{actual_num_topics}.npy'
-        
-        # If still not found, check model/ subdirectory (HDP/neural models)
-        if not theta_path.exists():
-            theta_path = model_dir / model_name / 'model' / f'theta_k{actual_num_topics}.npy'
-            beta_path = model_dir / model_name / 'model' / f'beta_k{actual_num_topics}.npy'
-        
-        if all(p.exists() for p in [bow_path, vocab_path, theta_path, beta_path]):
-            bow_matrix = np.load(bow_path)
-            with open(vocab_path, 'r', encoding='utf-8') as f:
-                vocab = json.load(f)
-            theta = np.load(theta_path)
-            beta = np.load(beta_path)
-            
-            training_history = None
-            history_path = model_dir / f'training_history_k{args.num_topics}.json'
-            if history_path.exists():
-                with open(history_path, 'r') as f:
-                    training_history = json.load(f)
-            
+        # Use the same native loader as report generation: inferred K, model vocabulary and BOW agree.
+        from visualization.run_visualization import load_baseline_data
+        evaluation_data = load_baseline_data(str(model_dir), args.dataset, model_name, args.num_topics, workspace_dir=str(workspace_dir))
+        if evaluation_data.get('bow_matrix') is not None:
+            theta, beta = evaluation_data['theta'], evaluation_data['beta']
+            bow_matrix, vocab = evaluation_data['bow_matrix'], evaluation_data['vocab']
+            actual_num_topics = theta.shape[1]
+            training_history = evaluation_data.get('training_history')
+
             # Evaluation only outputs JSON, no PNG generation
             # PNG visualization is handled by visualization module
             evaluator = UnifiedEvaluator(
                 beta=beta, theta=theta, bow_matrix=bow_matrix, vocab=vocab,
-                training_history=training_history,
+                training_history=training_history, model_name=model_name,
                 dataset=args.dataset, output_dir=str(model_dir), num_topics=actual_num_topics
             )
             metrics = evaluator.compute_all_metrics()
@@ -875,7 +813,8 @@ def run_baseline(model_name: str, args) -> Dict[str, Any]:
                     num_topics=viz_num_topics,
                     output_dir=str(lang_output_dir),
                     language=lang,
-                    dpi=300
+                    dpi=300,
+                    workspace_dir=workspace_dir
                 )
             result['viz_status'] = 'completed'
             result['viz_dir'] = str(model_dir)
@@ -997,6 +936,8 @@ def main():
             results.append({'model': model_name, 'status': f'error: {e}'})
     
     print_summary(results)
+    if any(result.get('error') or result.get('train_status') == 'failed' or str(result.get('status', '')).startswith('error:') for result in results):
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

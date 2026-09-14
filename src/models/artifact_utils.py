@@ -263,3 +263,52 @@ def validate_topic_matrices(theta, beta, vocab, model):
         raise ValueError('Non-finite or negative topic-word results')
     if model != 'nvdm' and (theta < 0).any(): raise ValueError('Negative topic probabilities')
     if (beta.sum(axis=1) <= 0).any(): raise ValueError('Topics have empty word distributions')
+
+
+def export_baseline_metadata(directory, model_name, result, trainer):
+    """Complete existing native exports, without recomputing theta or beta or fitting."""
+    import numpy as np
+    from scipy import sparse
+    root = Path(directory)
+    theta_file, beta_file = find_topic_matrix_pair(root)
+    output = theta_file.parent
+    model = result['model']
+    vocab = list(model._beta_vocab) if model_name == 'bertopic' else list(trainer.vocab)
+    validate_topic_matrices(result['theta'], result['beta'], vocab, model_name)
+    (output / 'vocab.json').write_text(json.dumps(vocab, ensure_ascii=False), encoding='utf-8')
+    if model_name == 'bertopic':
+        # The already-fitted BERTopic vectorizer defines its vocabulary; never use the BOW worker's other vocabulary.
+        vectorizer = model.model.vectorizer_model
+        counts = vectorizer.transform(trainer.texts)
+        columns = [vectorizer.vocabulary_[word] for word in vocab]
+        sparse.save_npz(output / 'bow_matrix.npz', counts[:, columns].tocsr())
+        np.save(output / 'document_topics.npy', np.asarray(model.get_topics(), dtype=np.int64))
+    history = result.get('training_history')
+    if history and not list(output.glob('training_history*.json')):
+        keys = list(dict.fromkeys(key for row in history for key in row if key != 'epoch'))
+        history = {('train_loss' if key == 'loss' else key): [row.get(key) for row in history] for key in keys}
+        (output / 'training_history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')
+    if not list(output.glob('topic_words*.json')):
+        words = {str(k): [vocab[i] for i in np.argsort(-result['beta'][k])[:20]] for k in range(result['beta'].shape[0])}
+        (output / 'topic_words.json').write_text(json.dumps(words, ensure_ascii=False), encoding='utf-8')
+    # Keep an actual reusable model checkpoint for every model, including traditional baselines.
+    if not any(output.glob('*.pt')) and not any(output.glob('*.pkl')) and not any(output.glob('*.joblib')):
+        if hasattr(model, 'save_model'): model.save_model(str(output / 'model.pt'))
+        else:
+            import joblib
+            joblib.dump(model, output / 'model.joblib')
+    return write_topic_result_manifest(root, model_name, result['theta'], result['beta'], vocab)
+
+
+def write_topic_result_manifest(root, model_name, theta, beta, vocab):
+    root = Path(root)
+    validate_topic_matrices(theta, beta, vocab, model_name)
+    theta_file, beta_file = find_topic_matrix_pair(root)
+    metadata = {'schemaVersion': 'theta.model-result.v1', 'modelId': model_name,
+                'documentCount': int(theta.shape[0]), 'topicCount': int(beta.shape[0]),
+                'vocabularySize': len(vocab), 'theta': str(theta_file.relative_to(root)), 'beta': str(beta_file.relative_to(root)),
+                'thetaSemantics': 'latent_coordinates_not_probabilities' if model_name == 'nvdm' else 'membership_mass_excluding_outliers' if model_name == 'bertopic' else 'topic_distribution',
+                'betaSemantics': 'normalized_selected_ctfidf_weights' if model_name == 'bertopic' else 'last_time_slice_topic_word_distribution' if model_name == 'dtm' else 'topic_word_distribution',
+                'matrixHashes': {'theta': sha256_file(theta_file), 'beta': sha256_file(beta_file)}}
+    (root / 'result_manifest.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
+    return metadata

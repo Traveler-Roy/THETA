@@ -53,9 +53,13 @@ click>=8.1.3
 # =============================================================================
 # BERTopic and related
 # =============================================================================
-bertopic>=0.15.0
-hdbscan>=0.8.29
+bertopic>=0.16,<0.18
+hdbscan>=0.8.33,<0.9
 umap-learn>=0.5.3
+
+# Local SBERT used by CTM and BERTopic; weights are provisioned separately.
+sentence-transformers>=3,<6
+transformers>=4.57.3,<5
 
 # Offline interactive Sankey charts
 plotly>=5.0

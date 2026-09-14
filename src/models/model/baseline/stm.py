@@ -286,7 +286,7 @@ class STM(TraditionalTopicModel):
         # Beta: topic-word distributions, shape (K, V) — initialize with LDA
         from sklearn.decomposition import LatentDirichletAllocation
         lda_init = LatentDirichletAllocation(
-            n_components=K, max_iter=10, random_state=self.random_state
+            n_components=K, max_iter=min(10, max(1, self.max_iter)), random_state=self.random_state
         )
         lda_init.fit(bow_matrix)
         Beta = lda_init.components_ / lda_init.components_.sum(axis=1, keepdims=True)
@@ -323,8 +323,8 @@ class STM(TraditionalTopicModel):
                     # Gradient: doc_counts * (I_{-K} - theta_{-K}) - Sigma_inv @ (eta_d - mu_d)
                     Sigma_inv = np.linalg.solve(Sigma, np.eye(K - 1))
                     
-                    # Reuse the corrected word-evidence gradient from agent-dev.
-                    theta_mk = theta_d[:-1]
+                    # Use word evidence, not theta minus itself (which was always zero).
+                    theta_mk = theta_d[:-1]  # first K-1
                     gradient = _document_gradient(doc_bow, Beta, theta_d, eta_d, mu_d, Sigma_inv)
                     
                     # Approximate Hessian (diagonal)

@@ -46,6 +46,7 @@ from config import (
     BASE_WORKSPACE, get_workspace_path, ensure_dir
 )
 from gpu_utils import configure_cuda_visible_devices
+from row_provenance import record_cleaning, export_lineage
 
 
 def parse_args():
@@ -320,7 +321,8 @@ def run_dataclean(raw_input: str, dataset: str, language: str = None) -> Path:
         
         # Clean text
         cleaned_texts = []
-        for text in tqdm(df[text_col].fillna('').astype(str), desc="Cleaning text"):
+        original_texts = df[text_col].fillna('').astype(str).tolist()
+        for text in tqdm(original_texts, desc="Cleaning text"):
             cleaned = cleaner.clean_text(text)
             cleaned_texts.append(cleaned)
         
@@ -335,6 +337,7 @@ def run_dataclean(raw_input: str, dataset: str, language: str = None) -> Path:
                 result_df[col] = df[col]
         
         result_df.to_csv(output_csv, index=False)
+        record_cleaning(raw_path, output_csv, original_texts, cleaned_texts)
         print(f"  Cleaning completed: {output_csv}")
         return output_csv
     else:
@@ -1071,6 +1074,9 @@ def prepare_theta_data(args):
     exp_dir = result_base / exp_id
     data_dir = exp_dir / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / 'texts.json').write_text(json.dumps(texts, ensure_ascii=False), encoding='utf-8')
+    np.save(data_dir / 'source_rows.npy', np.arange(len(texts), dtype=np.int64))
+    export_lineage(data_path, data_dir, texts, np.arange(len(texts), dtype=np.int64))
     
     bow_dir = data_dir / 'bow'
     emb_dir = data_dir / 'embeddings'
@@ -1186,6 +1192,9 @@ def prepare_baseline_data(args):
         json.dump(config, f, ensure_ascii=False, indent=2)
     print(f"  Config saved to: {result_dir / 'config.json'}")
     
+    (result_dir / 'texts.json').write_text(json.dumps(texts, ensure_ascii=False), encoding='utf-8')
+    np.save(result_dir / 'source_rows.npy', np.arange(len(texts), dtype=np.int64))
+    export_lineage(data_path, result_dir, texts, np.arange(len(texts), dtype=np.int64))
     # 1. Generate BOW
     bow_matrix, vocab = generate_bow(texts, args.vocab_size, result_dir)
     
@@ -1219,14 +1228,18 @@ def prepare_baseline_data(args):
                 # Extract covariates and encode categorical variables
                 from sklearn.preprocessing import LabelEncoder
                 covariates_list = []
+                covariate_encoding = {}
                 for col in available_cols:
                     le = LabelEncoder()
                     encoded = le.fit_transform(df[col].fillna('unknown').astype(str))
                     covariates_list.append(encoded)
+                    covariate_encoding[col] = {str(value): int(index) for index, value in enumerate(le.classes_)}
                 covariates = np.column_stack(covariates_list)
                 np.save(result_dir / 'covariates.npy', covariates)
                 with open(result_dir / 'covariate_names.json', 'w', encoding='utf-8') as f:
                     json.dump(available_cols, f, ensure_ascii=False, indent=2)
+                with open(result_dir / 'covariate_encoding.json', 'w', encoding='utf-8') as f:
+                    json.dump(covariate_encoding, f, ensure_ascii=False, indent=2)
                 print(f"\n[Covariates] Extracted {len(available_cols)} columns: {available_cols}")
                 print(f"  Shape: {covariates.shape}")
             else:
@@ -1288,6 +1301,7 @@ def prepare_dtm_data(args):
     # Load data
     print(f"Loading data from {data_path}")
     df = pd.read_csv(data_path)
+    df['_theta_source_row'] = np.arange(len(df), dtype=np.int64)
     
     # Find text column
     text_col = None
@@ -1426,11 +1440,13 @@ def prepare_dtm_data(args):
         import traceback
         print(f"  [Warning] Time parsing failed: {e}")
         print(f"  Traceback: {traceback.format_exc()}")
-        time_values = np.zeros(len(df), dtype=int)
+        raise ValueError('DTM time parsing failed; refusing fabricated time slices') from e
     
     # Calculate time slices
     unique_times = sorted(set(time_values))
-    num_time_slices = args.time_slices if args.time_slices else len(unique_times)
+    if args.time_slices is not None and args.time_slices != len(unique_times):
+        raise ValueError(f'time_slices={args.time_slices} does not match {len(unique_times)} observed periods; explicitly regroup the time column first')
+    num_time_slices = len(unique_times)
     
     # Create time to index mapping
     time_to_idx = {t: i for i, t in enumerate(unique_times)}
@@ -1453,9 +1469,12 @@ def prepare_dtm_data(args):
     if args.exp_name:
         exp_id = f"exp_{timestamp}_{args.exp_name}"
     
-    result_dir = Path(RESULT_DIR) / 'baseline' / dataset / 'data' / exp_id
+    result_dir = Path(args.output_dir) if args.output_dir else Path(RESULT_DIR) / 'baseline' / dataset / 'data' / exp_id
     result_dir.mkdir(parents=True, exist_ok=True)
     
+    (result_dir / 'texts.json').write_text(json.dumps(texts, ensure_ascii=False), encoding='utf-8')
+    np.save(result_dir / 'source_rows.npy', df['_theta_source_row'].to_numpy(dtype=np.int64))
+    export_lineage(data_path, result_dir, texts, df['_theta_source_row'].to_numpy(dtype=np.int64))
     # Save config.json
     config = {
         'exp_id': exp_id,
@@ -1490,7 +1509,7 @@ def prepare_dtm_data(args):
     print(f"\n  Time slice info saved to: {result_dir / 'time_slices.json'}")
     print(f"  Time indices saved to: {result_dir / 'time_indices.npy'}")
     
-    if args.bow_only:
+    if args.bow_only or args.skip_sbert:
         print("\n[Done] Only generated BOW and time slice info")
         return True
     
