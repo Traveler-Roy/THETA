@@ -680,6 +680,8 @@ If you find **THETA** useful in your research, please consider citing our paper:
 For questions, please contact:
 - duanzhenke@code-soul.com
 
+- Agent through CLI Application is coming soon.
+
 ---
 
 ## License
